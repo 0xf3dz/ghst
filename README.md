@@ -1,6 +1,6 @@
 ﻿# Ghst
 
-A local desktop assistant for thesis-defense questions. The app window and packaged executable use the name `Ghst`. The existing `compass` site remains unchanged.
+A local desktop assistant for thesis-defense questions. The app window and packaged executable use the name `Ghst`.
 
 ## Features
 
@@ -210,10 +210,10 @@ Local integration checks exercised a generated 180-page PDF, retrieval from page
 
 The standalone macOS app also launched successfully. Its compact resize and always-on-top controls worked. A live Zoom call still requires an API key for transcription and operating-system capture permission.
 
-A live omp check answered from an attached PDF through `openai-codex/gpt-6-sol`. The answer included the expected salinity, 35 PSU, and citation `[1]`. No saved or environment API key was present for that answer. The local API fixture recorded no API answer request. The separate transcription check used a local fixture, not real transcription.
+A live omp check answered from an attached test PDF through `openai-codex/gpt-6-sol`. No saved or environment API key was present for that answer. The local API fixture recorded no API answer request. The separate transcription check used a local fixture, not real transcription.
 
 Browser checks verified the selected-model check and saved settings for each provider. The rebuilt macOS app opened with ChatGPT through omp as its default answer connection and detected the configured sign-in.
 
 The updated fallback checks exercise quota failures, partial-answer replacement, missing keys, cancellation, client disconnects, and saved answer history. An HTTP smoke check and a browser check verified the replacement answer and API charge notice with local provider fixtures.
 
-A real API request with the thesis evidence and revised attached `SKILL.md` produced an answer without the irrelevant evidence-gap sentence. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified because Zoom is absent and this process lacks screen capture permission.
+A real API request with reference evidence and a revised answer skill produced an answer without an irrelevant evidence-gap sentence. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified.
