@@ -1,0 +1,28 @@
+{
+  "name": "thesis-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local thesis reference and live defense assistant",
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "predesktop": "install-electron && node desktop/prepare-macos.cjs",
+    "desktop": "electron .",
+    "package:mac": "node desktop/package.cjs",
+    "test": "node --test lib/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "openai": "^6.0.0",
+    "pdfjs-dist": "^5.4.296"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "@electron/packager": "20.3.0"
+  }
+}

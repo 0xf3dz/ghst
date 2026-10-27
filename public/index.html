@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Ghst</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <button class="new-session" id="new-session">
+          <span>＋</span> New session <kbd>⌘ K</kbd>
+        </button>
+        <div class="section-label">YOUR WORKSPACE</div>
+        <button class="nav-item selected" id="workspace-link">
+          <span class="nav-icon">◫</span> War room
+          <span class="small-dot"></span>
+        </button>
+        <div class="section-label sessions-heading">RECENT SESSIONS</div>
+        <div id="sessions" class="sessions"></div>
+        <div class="library">
+          <div class="section-label library-heading">
+            CONTEXT LIBRARY <span id="document-count">0</span>
+          </div>
+          <div id="documents" class="documents"></div>
+          <label class="upload-zone" id="upload-zone" for="files"
+            ><span class="upload-symbol">↥</span
+            ><span id="upload-label">Add files</span
+            ><small>PDF or Markdown · up to 100 MB</small></label
+          >
+          <input id="files" type="file" accept=".pdf,.md" multiple hidden />
+        </div>
+        <div class="sidebar-footer">
+          <span class="local-dot"></span><span>Stored on your device</span
+          ><button id="settings" class="icon-button" aria-label="Open settings">
+            ⚙
+          </button>
+        </div>
+      </aside>
+      <main>
+        <header class="topbar">
+          <button
+            class="icon-button mobile-menu"
+            id="toggle-sidebar"
+            aria-label="Open context library"
+            aria-expanded="false"
+          >
+            ☰
+          </button>
+          <div class="breadcrumbs">
+            Workspace <span>/</span> <strong>War room</strong>
+          </div>
+          <div class="window-actions">
+            <button type="button" class="connection" id="connection">
+              API key required</button
+            ><button
+              class="icon-button"
+              id="pin"
+              title="Keep window on top"
+              aria-label="Keep window on top"
+              aria-pressed="false"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M8 3h8v6l3 4v2H5v-2l3-4V3ZM12 15v6" />
+              </svg></button
+            ><button
+              class="icon-button"
+              id="compact"
+              title="Compact view"
+              aria-label="Compact view"
+              aria-pressed="false"
+            >
+              ⊡
+            </button>
+          </div>
+        </header>
+        <section class="room-heading">
+          <div>
+            <h1>War room<span>.</span></h1>
+          </div>
+          <button id="export" class="secondary-button">
+            ↗ <span>Export session</span>
+          </button>
+        </section>
+        <section class="session-toolbar" aria-label="Session controls">
+          <div class="session-name">
+            <span class="session-indicator" id="session-indicator"></span>
+            <div>
+              <strong id="session-title">Intel</strong
+              ><span id="session-subtitle">Ready when you are</span>
+            </div>
+          </div>
+          <div class="record-controls">
+            <span class="timer" id="timer">00:00</span
+            ><select id="audio-source" aria-label="Audio source">
+              <option value="zoom">Zoom output only</option>
+              <option value="system">All system audio</option>
+              <option value="microphone">
+                Microphone / audio device
+              </option></select
+            ><select id="audio-device" aria-label="Microphone device" hidden>
+              <option value="">Default input</option></select
+            ><button id="listen" class="primary-button">
+              <span class="record-dot"></span> Start listening
+            </button>
+          </div>
+        </section>
+        <div class="workspace">
+          <section class="answers-panel">
+            <div class="panel-bar">
+              <div class="panel-title">
+                <span class="spark">✧</span> Answer assistant
+              </div>
+              <span id="model-label" class="model-label">gpt-4.1</span>
+            </div>
+            <div id="messages" class="messages" aria-live="polite"></div>
+            <div id="working" class="working" hidden>
+              <span class="pulse-dot"></span> Preparing an answer from your
+              references…
+            </div>
+            <form id="question-form" class="composer">
+              <label class="sr-only" for="question">Ask a question</label
+              ><textarea
+                id="question"
+                rows="2"
+                placeholder="Ask a question, or use the live transcript…"
+              ></textarea>
+              <div class="composer-bottom">
+                <span id="context-label">No references attached</span>
+                <div>
+                  <kbd>⌘ ↵</kbd
+                  ><button
+                    type="submit"
+                    id="ask"
+                    class="send-button"
+                    aria-label="Send question"
+                  >
+                    ↑
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div class="answer-note">
+              Check answers against your research. Sources appear below each
+              answer.
+            </div>
+          </section>
+          <aside class="transcript-panel">
+            <div class="panel-bar">
+              <span class="panel-title"
+                ><span class="wave-icon">≋</span> Live transcript</span
+              ><span class="live-label" id="live-label">OFFLINE</span>
+            </div>
+            <div class="transcript-options">
+              <label class="switch-label"
+                ><input type="checkbox" id="auto-answer" role="switch" /><span
+                  class="switch"
+                ></span>
+                Auto-answer</label
+              ><button
+                class="text-button"
+                id="use-transcript"
+                title="Copy the latest transcript into the question"
+              >
+                Use latest ↗
+              </button>
+            </div>
+            <div id="transcript" class="transcript">
+              <div class="transcript-empty">
+                <div class="waveform">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i
+                  ><i></i>
+                </div>
+                <h3>The conversation starts here</h3>
+                <p>Start listening. You can also paste a transcript below.</p>
+              </div>
+            </div>
+            <div class="audio-meter" aria-label="Audio input level">
+              <span id="audio-level"></span>
+            </div>
+            <form id="transcript-form" class="transcript-input">
+              <label class="sr-only" for="manual-transcript"
+                >Add transcript text</label
+              ><textarea id="manual-transcript" rows="2"></textarea
+              ><button
+                type="submit"
+                aria-label="Add transcript"
+                class="icon-button"
+              >
+                ＋
+              </button>
+            </form>
+            <div class="transcript-note" id="audio-note">
+              Audio goes to OpenAI for transcription.
+            </div>
+          </aside>
+        </div>
+        <footer class="room-footer">
+          <span><span class="local-dot"></span> Local workspace</span>
+        </footer>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <dialog id="settings-dialog">
+      <form id="settings-form">
+        <div class="dialog-heading">
+          <div>
+            <div class="eyebrow">YOUR CONNECTION</div>
+            <h2>Assistant settings</h2>
+          </div>
+          <button
+            type="button"
+            id="close-settings"
+            class="icon-button"
+            aria-label="Close settings"
+          >
+            ×
+          </button>
+        </div>
+        <p class="settings-intro">
+          Choose ChatGPT through omp or OpenAI API credits for answers.
+          Transcription always uses your OpenAI API key and API credits.
+        </p>
+        <label for="answer-provider">Answer connection</label>
+        <select id="answer-provider">
+          <option value="chatgpt">ChatGPT subscription through omp</option>
+          <option value="openai">OpenAI API credits</option>
+        </select>
+        <section id="subscription-settings" class="subscription-settings">
+          <div class="subscription-heading">
+            <strong>ChatGPT through omp</strong
+            ><button
+              type="button"
+              id="check-subscription"
+              class="secondary-button"
+            >
+              Check connection
+            </button>
+          </div>
+          <p id="subscription-status" role="status">
+            Check your omp connection.
+          </p>
+          <p>
+            To connect, run this command in your terminal and complete the
+            browser sign-in:
+          </p>
+          <code>omp login openai-codex</code>
+          <label for="subscription-model">Subscription answer model</label>
+          <input
+            id="subscription-model"
+            value="openai-codex/gpt-6-sol"
+            maxlength="120"
+            spellcheck="false"
+          />
+          <small
+            >Uses your ChatGPT plan's Codex allowance. If the subscription fails,
+            answers automatically use your API key and API credits.</small
+          >
+        </section>
+        <label for="api-key">OpenAI API key for transcription and fallback</label
+        ><input
+          id="api-key"
+          type="password"
+          autocomplete="off"
+          placeholder="sk-…"
+        /><small id="key-hint"
+          >The local server stores your key. The interface never receives
+          it.</small
+        >
+        <div class="form-columns">
+          <div id="api-answer-settings">
+            <label for="answer-model">API answer and fallback model</label
+            ><select id="answer-model">
+              <option>gpt-4.1</option>
+              <option>gpt-4.1-mini</option>
+              <option>gpt-4.1-nano</option>
+              <option>gpt-4o</option>
+              <option>gpt-4o-mini</option>
+            </select>
+          </div>
+          <div>
+            <label for="transcribe-model">Transcription model</label
+            ><select id="transcribe-model">
+              <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+              <option value="gpt-4o-mini-transcribe">
+                gpt-4o-mini-transcribe
+              </option>
+            </select>
+          </div>
+        </div>
+        <label for="language">Transcription language</label
+        ><input
+          id="language"
+          placeholder="Automatic, or a language code such as en or pt"
+          maxlength="10"
+        />
+        <label for="instructions">Additional instructions</label
+        ><textarea
+          id="instructions"
+          rows="4"
+          placeholder="For example: Answer in English. Use concise points. Distinguish evidence from interpretation."
+        ></textarea>
+        <p class="settings-privacy">
+          Relevant PDF passages, skill instructions, and conversation context go
+          to OpenAI through the selected answer connection. Audio uses the
+          transcription API.
+        </p>
+        <div class="dialog-footer">
+          <button type="button" id="remove-key" class="text-button danger">
+            Remove saved key</button
+          ><button type="submit" id="save-settings" class="primary-button">
+            Save settings
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <template id="welcome-template"
+      ><div class="welcome">
+        <div class="welcome-orbit"><span>✧</span></div>
+        <div class="welcome-steps">
+          <div>
+            <span>01</span><strong>Add your references</strong>
+            <p>Attach your thesis PDF and Markdown skills.</p>
+          </div>
+          <div>
+            <span>02</span><strong>Connect your audio</strong>
+            <p>Capture the call or paste a jury question.</p>
+          </div>
+          <div>
+            <span>03</span><strong>Answer with evidence</strong>
+            <p>Review suggested answers and source pages.</p>
+          </div>
+        </div>
+        <div class="suggestions">
+          <button data-question="What is the main contribution of my thesis?">
+            Explain my contribution ↗</button
+          ><button
+            data-question="What are the main limitations of my research?"
+          >
+            Discuss the limitations ↗
+          </button>
+        </div>
+      </div></template
+    >
+  </body>
+</html>
