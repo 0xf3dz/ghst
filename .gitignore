@@ -1,0 +1,15 @@
+node_modules/
+.DS_Store
+.env
+.env.*
+!.env.example
+.data/
+coverage/
+dist/
+desktop/native/
+.thesis-assistant/
+state.json
+uploads/
+*.log
+*.pem
+*.key
