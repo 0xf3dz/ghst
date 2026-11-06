@@ -1,3 +1,5 @@
+import { PersistentOmp } from "./lib/omp-agent.js";
+import { validateConnectionSettings, localModels, localTranscribe } from "./lib/connections.js";
 import express from "express";
 import multer from "multer";
 import { createServer } from "node:http";
@@ -5,9 +7,8 @@ import { randomUUID } from "node:crypto";
 import { chmod, rm } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Store, HttpError, boundedText, publicSession } from "./lib/store.js";
+import { Store, HttpError, boundedText } from "./lib/store.js";
 import { Documents } from "./lib/documents.js";
-import { RetrievalIndex } from "./lib/retrieval.js";
 import { Subscription } from "./lib/subscription.js";
 import { answerClient, answerEvents } from "./lib/answers.js";
 import {
@@ -53,52 +54,11 @@ function requireJSON(req, _res, next) {
 }
 
 function validateSubscriptionModel(model) {
-  if (
-    typeof model !== "string" ||
-    model.length > 120 ||
-    !/^openai-codex\/[A-Za-z0-9._-]+$/.test(model)
-  )
-    throw new HttpError(
-      400,
-      "Use an exact openai-codex model ID, up to 120 characters.",
-    );
-  return model;
+  return validateConnectionSettings({ subscriptionModel: model }).subscriptionModel;
 }
 
 function settingsUpdate(body) {
-  const update = {};
-  if (body.answerProvider !== undefined) {
-    if (!["chatgpt", "openai"].includes(body.answerProvider))
-      throw new HttpError(
-        400,
-        "The answer provider must be chatgpt or openai.",
-      );
-    update.answerProvider = body.answerProvider;
-  }
-  if (body.subscriptionModel !== undefined)
-    update.subscriptionModel = validateSubscriptionModel(
-      body.subscriptionModel,
-    );
-  if (body.answerModel !== undefined) {
-    if (!ANSWER_MODELS.has(body.answerModel))
-      throw new HttpError(
-        400,
-        `Supported answer models: ${[...ANSWER_MODELS].join(", ")}.`,
-      );
-    update.answerModel = body.answerModel;
-  }
-  if (body.transcribeModel !== undefined) {
-    if (
-      !["gpt-4o-transcribe", "gpt-4o-mini-transcribe"].includes(
-        body.transcribeModel,
-      )
-    )
-      throw new HttpError(
-        400,
-        "The transcription model must be gpt-4o-transcribe or gpt-4o-mini-transcribe.",
-      );
-    update.transcribeModel = body.transcribeModel;
-  }
+  const update = validateConnectionSettings(body);
   if (body.language !== undefined) {
     if (
       typeof body.language !== "string" ||
@@ -110,16 +70,15 @@ function settingsUpdate(body) {
       );
     update.language = body.language.toLowerCase();
   }
-  if (body.instructions !== undefined) {
+  if (body.opacity !== undefined) {
     if (
-      typeof body.instructions !== "string" ||
-      body.instructions.length > 16000
+      typeof body.opacity !== "number" ||
+      !Number.isFinite(body.opacity) ||
+      body.opacity < 0.5 ||
+      body.opacity > 1
     )
-      throw new HttpError(
-        400,
-        "Instructions must contain no more than 16000 characters.",
-      );
-    update.instructions = body.instructions;
+      throw new HttpError(400, "Window opacity must be between 0.5 and 1.");
+    update.opacity = body.opacity;
   }
   if (
     body.apiKey !== undefined &&
@@ -197,13 +156,14 @@ export async function startServer({
   store = new Store(),
   subscription = new Subscription(),
   createClient = clientFor,
+  agentRuntime,
 } = {}) {
   port = Number(port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error("PORT must be an integer from 0 to 65535.");
   await store.init();
-  const index = new RetrievalIndex();
-  const documents = await new Documents(store, index).init();
+  const documents = await new Documents(store).init();
+  agentRuntime ||= new PersistentOmp({ store, documents });
   const answering = new Map();
   const transcriptions = new Set();
   const app = express();
@@ -235,6 +195,11 @@ export async function startServer({
     next();
   });
   app.use(express.json({ limit: "128kb", strict: true }));
+  app.use("/api/sessions/:sessionId", (req, _res, next) => {
+    if (req.params.sessionId !== store.state.sessions[0].id)
+      return next(new HttpError(404, "Conversation not found."));
+    next();
+  });
 
   const disk = multer.diskStorage({
     destination: (_req, _file, callback) =>
@@ -284,6 +249,23 @@ export async function startServer({
     }),
   );
   app.get(
+    "/api/models",
+    asyncRoute(async (req, res) => {
+      const metadata =
+        typeof subscription.metadata === "function"
+          ? await subscription.metadata(false, req.query.provider || store.state.settings.answerProvider)
+          : null;
+      const subscriptionModels = new Set(metadata?.models ?? []);
+      const configuredModel = store.state.settings.subscriptionModel;
+      if (configuredModel) subscriptionModels.add(configuredModel);
+      res.json({
+        subscriptionModels: [...subscriptionModels],
+        apiModels: [...ANSWER_MODELS],
+        ollamaModels: await localModels(store.state.settings).catch(() => []),
+      });
+    }),
+  );
+  app.get(
     "/api/subscription",
     asyncRoute(async (_req, res) => {
       res.json(
@@ -313,7 +295,9 @@ export async function startServer({
     "/api/settings",
     requireJSON,
     asyncRoute(async (req, res) => {
-      const update = settingsUpdate(req.body);
+      const body = { ...store.state.settings, ...req.body };
+      if (req.body.customCurl === "") body.customCurl = store.state.settings.customCurl;
+      const update = settingsUpdate(body);
       await store.update((state) => {
         Object.assign(state.settings, update);
         if (req.body.apiKey?.trim()) state.apiKey = req.body.apiKey.trim();
@@ -322,21 +306,16 @@ export async function startServer({
       res.json({ configured: state.configured, settings: state.settings });
     }),
   );
-  app.delete(
-    "/api/key",
-    asyncRoute(async (_req, res) => {
-      await store.update((state) => {
-        state.apiKey = "";
-      });
-      res.json({ configured: Boolean(store.key()) });
-    }),
-  );
+  app.get("/api/key", (_req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.json({ apiKey: store.key(), customCurl: store.state.settings.customCurl || "" });
+  });
   app.post(
-    "/api/documents",
+    "/api/sessions/:sessionId/documents",
     referencesUpload,
     asyncRoute(async (req, res) => {
       try {
-        const added = await documents.add(req.files || []);
+        const added = await documents.add(req.files || [], req.params.sessionId);
         res.status(201).json({ documents: added });
       } finally {
         await cleanupUpload(req);
@@ -344,70 +323,13 @@ export async function startServer({
     }),
   );
   app.delete(
-    "/api/documents/:id",
+    "/api/sessions/:sessionId/documents/:id",
     asyncRoute(async (req, res) => {
-      await documents.remove(req.params.id);
+      await documents.remove(req.params.id, req.params.sessionId);
       res.json({ ok: true });
     }),
   );
 
-  app.post(
-    "/api/sessions",
-    requireJSON,
-    asyncRoute(async (req, res) => {
-      const title =
-        boundedText(req.body.title, "Title", 160, { optional: true }) ||
-        "Research session";
-      const operationId = requestId(req);
-      const session = await store.update((state) => {
-        if (operationId) {
-          const existing = state.sessions.find(
-            (item) => item.requestId === operationId,
-          );
-          if (existing) {
-            if (existing.title !== title)
-              throw new HttpError(
-                409,
-                "This request ID was already used with another session title.",
-              );
-            return existing;
-          }
-        }
-        if (state.sessions.length >= 200)
-          throw new HttpError(
-            413,
-            "The app supports up to 200 sessions. Export and remove an old session first.",
-          );
-        const created = {
-          id: randomUUID(),
-          title,
-          createdAt: new Date().toISOString(),
-          transcript: [],
-          messages: [],
-          ...(operationId ? { requestId: operationId } : {}),
-        };
-        state.sessions.unshift(created);
-        return created;
-      });
-      res.status(201).json(publicSession(session));
-    }),
-  );
-  app.delete(
-    "/api/sessions/:id",
-    asyncRoute(async (req, res) => {
-      if (answering.has(req.params.id))
-        throw new HttpError(
-          409,
-          "An answer is running for this session. Stop it or wait before deleting the session.",
-        );
-      await store.update((state) => {
-        state.sessions = state.sessions.filter(
-          (session) => session.id !== req.params.id,
-        );
-      });
-      res.json({ ok: true });
-    }),
-  );
   app.post(
     "/api/sessions/:id/transcript",
     requireJSON,
@@ -435,7 +357,7 @@ export async function startServer({
         )
           throw new HttpError(
             413,
-            "This session is full. Export it and create a new session.",
+            "This conversation has reached its saved history limit. Export it to retain a readable copy.",
           );
         const item = {
           id: randomUUID(),
@@ -468,7 +390,8 @@ export async function startServer({
     "/api/transcribe",
     (req, _res, next) => {
       try {
-        req.openai = clientFor(store);
+        req.transcriptionSettings = { ...store.state.settings };
+        if (req.transcriptionSettings.transcribeProvider !== "local") req.openai = clientFor(store);
         if (transcriptions.size >= 3)
           throw new HttpError(
             429,
@@ -495,13 +418,10 @@ export async function startServer({
       });
       try {
         await chmod(req.file.path, 0o600);
-        const text = await transcribe(
-          req.openai,
-          req.file.path,
-          store.state.settings.language,
-          controller.signal,
-          store.state.settings.transcribeModel,
-        );
+        const text = req.transcriptionSettings.transcribeProvider === "local"
+          ? await localTranscribe({ settings: req.transcriptionSettings, path: req.file.path, signal: controller.signal })
+          : await transcribe(req.openai, req.file.path, req.transcriptionSettings.language,
+              controller.signal, req.transcriptionSettings.transcribeModel);
         if (!res.destroyed) res.json({ text });
       } finally {
         transcriptions.delete(controller);
@@ -510,6 +430,12 @@ export async function startServer({
     }),
   );
 
+  app.post("/api/sessions/:id/agent/command", requireJSON, asyncRoute(async (req, res) => {
+    store.session(req.params.id);
+    if (!["chatgpt", "claude", "gemini", "groq"].includes(store.state.settings.answerProvider))
+      throw new HttpError(400, "Select an omp answer connection to respond to this request.");
+    res.json(await agentRuntime.command(req.params.id, req.body));
+  }));
   app.post(
     "/api/sessions/:id/answer",
     requireJSON,
@@ -532,24 +458,21 @@ export async function startServer({
           409,
           "An answer is already running for this session. Wait for it to finish.",
         );
-      if (answering.size >= 3)
-        throw new HttpError(
-          429,
-          "Three answers are already running. Wait before requesting another.",
-        );
       if (
         snapshot.messages.length >= 2000 ||
         sessionSize(snapshot) + question.length + 64000 > 2000000
       )
         throw new HttpError(
           413,
-          "This session is full. Export it and create a new session.",
+          "This conversation has reached its saved history limit. Export it to retain a readable copy.",
         );
       if (operationId) {
-        const previous = snapshot.messages.find(
-          (message) =>
-            message.role === "assistant" && message.requestId === operationId,
-        );
+        const previous = snapshot.messages
+          .slice(snapshot.contextMessageStart || 0)
+          .find(
+            (message) =>
+              message.role === "assistant" && message.requestId === operationId,
+          );
         if (previous) {
           if (previous.question !== question)
             throw new HttpError(
@@ -576,10 +499,11 @@ export async function startServer({
       });
       try {
         const previousQuestion =
-          [...snapshot.messages]
+          snapshot.messages.slice(snapshot.contextMessageStart || 0)
             .reverse()
             .find((message) => message.role === "user" && !message.pending)
             ?.text || "";
+        const index = documents.indexFor(sessionId);
         const sources = index.search(question, 6, previousQuestion);
         const settings = { ...store.state.settings };
         if (
@@ -593,9 +517,9 @@ export async function startServer({
         let client;
         if (settings.answerProvider === "openai") {
           client = answerClient(settings, () => createClient(store));
-        } else if (settings.answerProvider === "chatgpt") {
+        } else if (["chatgpt", "claude", "gemini", "groq"].includes(settings.answerProvider)) {
           validateSubscriptionModel(settings.subscriptionModel);
-        } else {
+        } else if (!["ollama", "custom"].includes(settings.answerProvider)) {
           throw new HttpError(
             400,
             "Choose a supported answer provider in Settings.",
@@ -616,7 +540,7 @@ export async function startServer({
           )
             throw new HttpError(
               413,
-              "This session is full. Export it and create a new session.",
+              "This conversation has reached its saved history limit. Export it to retain a readable copy.",
             );
           const previous = session.messages.at(-1);
           if (
@@ -655,18 +579,21 @@ export async function startServer({
         res.flushHeaders();
         await sendEvent(res, { type: "sources", sources });
         let text = "";
+        const agentEvents = [];
+        let activityCharacters = 0;
         try {
           for await (const event of answerEvents({
             settings,
             messages,
-            subscription,
             signal: controller.signal,
             createClient: () => createClient(store),
             client,
+            agentRuntime,
+            sessionId,
+            question,
           })) {
             if (controller.signal.aborted)
               throw new HttpError(499, "The answer request was cancelled.");
-            if (event.type === "reset") text = "";
             if (event.type === "delta") {
               text += event.text;
               if (text.length > 64000) {
@@ -675,6 +602,13 @@ export async function startServer({
                   502,
                   "The answer exceeded the local response limit. Ask a narrower question.",
                 );
+              }
+            }
+            if (event.type === "agent" && agentEvents.length < 200) {
+              const size = JSON.stringify(event.event).length;
+              if (activityCharacters + size <= 256000) {
+                agentEvents.push(event.event);
+                activityCharacters += size;
               }
             }
             await sendEvent(res, event);
@@ -686,6 +620,7 @@ export async function startServer({
             role: "assistant",
             text,
             sources,
+            ...(agentEvents.length ? { agentEvents } : {}),
           };
           await store.update((state) => {
             const session = store.session(sessionId, state);
@@ -756,11 +691,13 @@ export async function startServer({
   const server = createServer(app);
   server.requestTimeout = 10 * 60 * 1000;
   server.headersTimeout = 30000;
-  server.on("close", () => {
-    for (const controller of [...answering.values(), ...transcriptions])
-      controller.abort();
+  let shutdownPromise;
+  const shutdown = () => shutdownPromise ||= (async () => {
+    for (const controller of [...answering.values(), ...transcriptions]) controller.abort();
     subscription.close();
-  });
+    await agentRuntime.close();
+  })();
+  server.on("close", () => { void shutdown().catch(() => console.error("The answer agent could not close its saved session.")); });
   await new Promise((resolveListen, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => {
@@ -768,7 +705,7 @@ export async function startServer({
       resolveListen();
     });
   });
-  return { server, url: `http://127.0.0.1:${server.address().port}` };
+  return { server, shutdown, url: `http://127.0.0.1:${server.address().port}` };
 }
 
 if (
@@ -776,12 +713,11 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   startServer()
-    .then(({ server, url }) => {
+    .then(({ server, url, shutdown }) => {
       console.log(`Ghst is available at ${url}`);
       for (const signal of ["SIGINT", "SIGTERM"])
         process.once(signal, () => {
-          server.close();
-          server.closeAllConnections();
+          void shutdown().finally(() => { server.close(); server.closeAllConnections(); });
         });
     })
     .catch(() => {

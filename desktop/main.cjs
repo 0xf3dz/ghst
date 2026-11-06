@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { ZoomAudio } = require("./zoom-audio.cjs");
 const {
@@ -14,9 +15,16 @@ const {
   systemPreferences,
 } = require("electron");
 
-app.setName("Ghst");
+const defaultName = "Ghst";
+app.setName(defaultName);
+// Keep preferences and Chromium storage independent of the display name.
+const userDataPath = app.getPath("userData");
+app.setPath("userData", userDataPath);
+const disguisePath = path.join(userDataPath, "disguise.json");
+let disguise = { enabled: false, name: defaultName };
 let mainWindow = null;
 let localServer = null;
+let shutdownBackend = null;
 let localOrigin = null;
 let quitting = false;
 let shutdownComplete = false;
@@ -56,7 +64,7 @@ function isTrustedFrame(frame) {
   );
 }
 
-function requireTrustedBoolean(event, value) {
+function requireTrustedContents(event) {
   if (
     quitting ||
     !isTrustedContents(event.sender) ||
@@ -66,12 +74,86 @@ function requireTrustedBoolean(event, value) {
       "Desktop controls are available only to the local application.",
     );
   }
-  if (typeof value !== "boolean")
-    throw new TypeError("The desktop setting must be a boolean.");
   return mainWindow;
 }
 
+function requireTrustedBoolean(event, value) {
+  const win = requireTrustedContents(event);
+  if (typeof value !== "boolean")
+    throw new TypeError("The desktop setting must be a boolean.");
+  return win;
+}
+
+function validateDisguise(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.enabled !== "boolean" ||
+    typeof value.name !== "string"
+  )
+    throw new TypeError("Disguise requires a boolean enabled value and a string name.");
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value.name))
+    throw new TypeError("The display name cannot contain control characters.");
+  const name = value.name.trim();
+  if (name.length > 60 || (value.enabled && !name.length))
+    throw new TypeError("The display name must contain 1 to 60 characters when enabled.");
+  return { enabled: value.enabled, name };
+}
+
+function applyDisguise(value) {
+  const name = value.enabled ? value.name : defaultName;
+  // These APIs set labels, not executable, bundle, renderer, or helper names.
+  // OS process viewers may ignore or truncate process.title.
+  app.setName(name);
+  process.title = name;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(name);
+}
+
+function loadDisguise() {
+  try {
+    disguise = validateDisguise(JSON.parse(fs.readFileSync(disguisePath, "utf8")));
+  } catch (error) {
+    if (error.code !== "ENOENT")
+      throw new Error(`Could not read desktop disguise preferences: ${error.message}`);
+  }
+  applyDisguise(disguise);
+}
+
+function saveDisguise(value) {
+  const temporaryPath = `${disguisePath}.tmp`;
+  fs.mkdirSync(userDataPath, { recursive: true });
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    fs.renameSync(temporaryPath, disguisePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {
+      // Preserve the original save error if temporary-file cleanup also fails.
+    }
+    throw new Error(`Could not save desktop disguise preferences: ${error.message}`);
+  }
+}
+
 function installWindowControls() {
+  ipcMain.handle("desktop:get-disguise", (event) => {
+    requireTrustedContents(event);
+    return { ...disguise };
+  });
+  ipcMain.handle("desktop:set-disguise", (event, value) => {
+    requireTrustedContents(event);
+    const next = validateDisguise(value);
+    try {
+      applyDisguise(next);
+      saveDisguise(next);
+    } catch (error) {
+      applyDisguise(disguise);
+      throw error;
+    }
+    disguise = next;
+    return { ...disguise };
+  });
   ipcMain.handle("desktop:start-zoom-audio", (event) => {
     requireTrustedBoolean(event, true);
     return zoomAudio.start();
@@ -92,6 +174,18 @@ function installWindowControls() {
     const win = requireTrustedBoolean(event, enabled);
     win.setAlwaysOnTop(enabled);
     return win.isAlwaysOnTop();
+  });
+  ipcMain.handle("desktop:set-opacity", (event, opacity) => {
+    const win = requireTrustedContents(event);
+    if (
+      typeof opacity !== "number" ||
+      !Number.isFinite(opacity) ||
+      opacity < 0.5 ||
+      opacity > 1
+    )
+      throw new TypeError("Window opacity must be between 0.5 and 1.");
+    win.setOpacity(opacity);
+    return win.getOpacity();
   });
 }
 
@@ -262,11 +356,13 @@ function installPermissions(desktopSession) {
 }
 
 async function launch() {
+  loadDisguise();
   const { startServer } = await import(
     pathToFileURL(path.join(__dirname, "..", "server.js")).href
   );
   const result = await startServer({ port: 0 });
   localServer = result.server;
+  shutdownBackend = result.shutdown;
   const url = new URL(result.url);
   if (
     url.protocol !== "http:" ||
@@ -292,14 +388,32 @@ async function launch() {
   installPermissions(desktopSession);
   installCaptureHandler(desktopSession);
   installWindowControls();
+  const settingsResponse = await fetch(new URL("/api/state", url));
+  if (!settingsResponse.ok)
+    throw new Error("The local server did not return the saved settings.");
+  const initialState = await settingsResponse.json();
+  const initialOpacity = initialState.settings?.opacity;
+  if (
+    typeof initialOpacity !== "number" ||
+    !Number.isFinite(initialOpacity) ||
+    initialOpacity < 0.5 ||
+    initialOpacity > 1
+  )
+    throw new Error("The saved window opacity is invalid.");
 
   mainWindow = new BrowserWindow({
-    title: "Ghst",
+    title: disguise.enabled ? disguise.name : defaultName,
+    icon: path.join(__dirname, "..", "public", "assets", "ghst-logo.png"),
     width: 1280,
     height: 860,
     minWidth: 460,
     minHeight: 600,
     show: false,
+    opacity: initialOpacity,
+    transparent: false,
+    backgroundColor: "#18191e",
+    titleBarStyle: "hiddenInset",
+    ...(process.platform === "darwin" ? { trafficLightPosition: { x: 16, y: 16 } } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       session: desktopSession,
@@ -313,6 +427,8 @@ async function launch() {
       webviewTag: false,
     },
   });
+  // A document title must not replace the selected native window label.
+  mainWindow.on("page-title-updated", (event) => event.preventDefault());
   const contents = mainWindow.webContents;
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
   const restrictNavigation = (event) => {
@@ -342,6 +458,7 @@ async function launch() {
 
 async function closeServer() {
   if (!localServer?.listening) return;
+  if (shutdownBackend) await shutdownBackend();
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => localServer.closeAllConnections(), 5000);
     localServer.close((error) => {

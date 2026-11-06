@@ -2,6 +2,8 @@
 
 A local desktop assistant for thesis-defense questions. The app window and packaged executable use the name `Ghst`.
 
+The app icon uses an enlarged white ghost on a solid black background, derived from the [supplied ghost animation](https://x.com/stackedlol/status/2112710842865041666). The main app screen does not display the logo. Icon assets reside in `public/assets/ghst-logo.png` and `desktop/ghst.icns`.
+
 ## Features
 
 - System audio capture for a Zoom call through the desktop app.
@@ -9,23 +11,26 @@ A local desktop assistant for thesis-defense questions. The app window and packa
 - Speech transcription with `gpt-4o-transcribe` or `gpt-4o-mini-transcribe`.
 - ChatGPT subscription answers through your installed `omp` and its `openai-codex` connection.
 - Local PDF text extraction and search, with source passages and PDF page numbers.
+- A local reference library for the saved conversation.
 - Full Markdown skill instructions in each answer request.
 - Streamed answers, manual questions, and optional automatic answers after speech segments.
 - Saved transcripts and questions for later discussion.
-- Markdown export, a compact view, and a desktop window that stays on top.
+- A compact view and a translucent desktop window that stays on top.
+- Two main panels, with Settings beside the answer model menu.
+- Reference files and a local upload button below the question field.
 
-The interface follows the reference-library, transcript, and answer workflow of [Natively](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant). This application contains an independent implementation. It does not include Natively code, branding, a hidden window, or process disguise.
+The interface follows the reference-library, transcript, and answer workflow of [Natively](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant). This application contains an independent implementation. It does not include Natively code, branding, or a hidden window.
 
 ## Requirements
 
 - Node.js 22.12 or later.
-- An OpenAI API key with API credit for transcription and automatic answer fallback.
+- An OpenAI API key with API credit for OpenAI transcription or direct API answers.
 - An installed `omp` with a ChatGPT sign-in for subscription answers.
 - macOS 14.2 or later for native system audio capture. Windows supports Electron loopback capture. Linux requires a virtual loopback or monitor input.
 - Xcode Command Line Tools with the macOS 15 SDK or later to build the Zoom audio helper. The packaged app includes this helper.
 - A searchable thesis PDF. Image-only PDFs require optical character recognition (OCR) before upload.
 
-The default answer connection uses your ChatGPT plan's Codex allowance through `omp`. If the subscription fails or reaches a limit, Ghst automatically answers through the OpenAI API. This fallback and transcription incur API charges. Select the API answer and fallback model in Settings.
+The default answer connection uses your ChatGPT plan's Codex allowance through `omp`. If the subscription fails, Ghst reports the failure. It does not repeat a persistent agent action through another provider. OpenAI transcription and direct API answers incur API charges.
 
 ## Start the application
 
@@ -61,15 +66,15 @@ On an Intel host, the output directory ends with `darwin-x64`. The build uses th
 ## Configure a defense session
 
 1. In your terminal, run `omp login openai-codex` and complete the browser sign-in.
-2. Open Settings with the gear button or the connection button.
+2. Open Settings with the gear button beside the answer model menu.
 3. Select `ChatGPT subscription through omp` and select `Check connection`.
 4. Enter your OpenAI API key for transcription and select a transcription model.
 5. If necessary, enter a transcription language code such as `en` or `pt`.
 6. Save the settings.
-7. Select `Add files` in the context library and attach your PDF.
+7. Select `+` below the question field and attach your PDF.
 8. Attach your Markdown skill files.
 9. Select an audio source.
-10. Select `Start listening`.
+10. Select `Listen` below `Live transcript`.
 
 The `skills/` directory includes two optional files:
 
@@ -80,6 +85,8 @@ The `skills/` directory includes two optional files:
 
 The application applies each attached Markdown file as instructions. Attach only files that you trust. To replace a reference, remove its old copy and attach the new file.
 
+The context library belongs to the saved conversation. The interface has no session tabs or session management controls. Existing saved conversations remain on disk. The application uses the first saved conversation.
+
 ## ChatGPT connection through omp
 
 Ghst calls your installed `omp` in non-interactive mode. It selects only the `openai-codex` provider for subscription answers. This provider uses your ChatGPT sign-in. It differs from the `openai` API provider. You do not need the Codex CLI for this connection.
@@ -88,19 +95,44 @@ Run `omp login openai-codex` in your terminal to connect your account. Ghst does
 
 `Check connection` checks installed model availability and stored OAuth account metadata. It does not make a paid model request or prove that the current quota permits a new answer. The first answer verifies online access.
 
-The settings panel separates the answer connection from the transcription API key. You can ask a typed question through your subscription without an API key. Audio transcription still requires that key.
+The settings panel separates answers from transcription. Local Whisper transcription does not require an API key.
 
-Ghst passes the selected PDF passages, Markdown instructions, and recent conversation to omp. It disables tools, extensions, ambient context files, and session persistence for these requests. The app does not open a second interactive omp window.
+Ghst runs one persistent omp agent for the saved conversation. The agent receives the selected PDF passages, Markdown skill files, and current instructions. Its native conversation persists across questions and application restarts. The workspace holds `references/`, `skills/`, and `files/`. The application does not open a second interactive omp window.
+
+Ghst disables ambient context files, LSP, prewalk, memory, and automatic model fallback inside the runtime.
+
+### Automatic conversation management
+
+Questions and automatic transcript answers use the same saved conversation and reference files. The native runtime starts when you submit a question.
+
+Ghst enables native automatic compaction, including maintenance during a turn. It prefers Snapcompact, then tries the native fallback methods when necessary. Snapcompact requires an image-capable model. The runtime decides when the conversation needs compaction; it does not compact after every transcript.
+
+You do not need manual compaction or tool controls. Reference reads stay inside the session workspace and do not require approval. File changes and unexpected interactive requests still require your response. `Cancel answer` stops the current turn and retains the saved conversation.
+
+Ghst does not permit model tools to access files outside the session workspace. Execution, subagent, and browser tools remain unavailable. Old saved trusted-mode preferences do not enable unrestricted access.
+
+
+### Other connections
+
+Select Claude or Gemini to use the corresponding omp account. Run `omp login anthropic` or `omp login google-gemini-cli`, then enter an exact model ID from `omp models`. Provider access policies apply. Groq uses credentials, not a ChatGPT-style subscription.
+
+For local answers, start Ollama and install a model with `ollama pull <model>`. Select Ollama and enter that model name.
+
+For local transcription, start a whisper.cpp HTTP server with your weights, for example `whisper-server -m /path/to/ggml-base.en.bin --port 8080`. Select Local Whisper and enter its URL. The server loads the weights; Ghst sends complete WAV segments to `/inference`. Ollama does not supply speech transcription.
+
+The experimental custom connection accepts an inline cURL POST template for an OpenAI-compatible endpoint. Use `{{model}}` and `{{messages}}` as complete JSON values. Ghst interprets supported HTTP options without a shell. File reads, command substitutions, and additional commands are prohibited.
+
+The transcription key stays masked until you select the eye button. Edit the field to replace the key. Settings retrieves the key only when you open the dialog.
 
 The default model is `openai-codex/gpt-6-sol`, available in the installed omp model list. To select another model, use its exact ID from `omp models openai-codex`.
 
-Ghst starts each subscription answer in a temporary empty directory. It excludes inherited API credentials and disables fallback inside omp. The application handles API fallback separately. omp still adds its generated workstation and project information to the system prompt.
+Ghst starts each session runtime in that session's workspace directory. It excludes inherited API credentials and disables fallback inside omp. omp still adds its generated workstation and project information to the system prompt.
 
 Each queued question retains its answer connection. If you change that connection before the request starts, Ghst rejects the question. Send the question again with the selected connection.
 
 The installed omp executable remains an external dependency. Install or update omp through your normal installation method. The packaged Ghst app does not bundle or replace omp. Select `Check connection` after you sign in or update omp.
 
-If the subscription fails, Ghst uses your saved API key and API answer model. If the key is missing, add it in Settings. If a subscription answer fails after text appears, Ghst replaces that partial text with the API answer. Cancellation does not start API fallback.
+If a subscription answer fails, Ghst shows the error without a second provider request. To use the OpenAI API, select that connection in Settings and supply an API key.
 
 ## Capture Zoom audio
 
@@ -108,7 +140,7 @@ If the subscription fails, Ghst uses your saved API key and API answer model. If
 
 1. Open the Zoom desktop app and join the call with computer audio.
 2. Select `Zoom output only` in Ghst.
-3. Select `Start listening`.
+3. Select `Listen`.
 4. Grant Screen & System Audio Recording permission to Ghst when macOS requests it.
 5. If macOS requires a restart, quit and reopen Ghst.
 6. Play remote speech through Zoom and check the input meter and transcript.
@@ -125,7 +157,7 @@ Select `All system audio` only when you want audio from all applications. This s
 
 1. Select `Microphone / audio device`.
 2. Select the input device.
-3. Select `Start listening`.
+3. Select `Listen`.
 4. Grant microphone permission when requested.
 
 A microphone does not directly capture remote Zoom participants. For direct call audio, select a virtual loopback input and route Zoom output to that device. Configure an additional output if you also need to hear the call.
@@ -147,17 +179,27 @@ Open `http://127.0.0.1:3210`. A browser can capture only the audio sources that 
 - Select `Answer this` below a transcript entry to answer that entry.
 - Select `Use latest` to edit the latest transcript before you send it.
 - Enable `Auto-answer` to answer each complete speech segment from the selected source.
-- Select a source below an answer to inspect its passage and PDF page.
-- Select `Export session` to save the transcript and answers as Markdown.
-- Open an earlier session to ask follow-up questions after the defense.
-
-The `War room` workspace creates each new session with the name `Intel` and the current local date. Existing session names remain unchanged.
+- Select a numbered citation button, such as `[1]`, inside an answer to inspect its passage and PDF page.
+- Select an answer model beside the Answer assistant title. API choices use API credits.
+- Continue the saved conversation to ask follow-up questions after the defense.
 
 Auto-answer is off by default. It processes speech segments, not speaker identities or confirmed jury questions. Pauses can divide a question into multiple segments. All speech from the selected source counts. For more control, keep auto-answer off and edit the question before you send it.
 
 The audio processor detects speech energy and waits approximately 1.15 seconds after a pause. It also divides continuous speech at approximately 22 seconds. It sends each segment as a complete mono WAV file. These are successive transcription requests, not token-by-token realtime transcription. The application stops capture if the transcription queue cannot keep up and reports the problem.
 
-The compact view hides the transcript. Enable auto-answer in the full view before you use compact mode if you want automatic answers. The menu button still opens the context library. The pin button requires desktop mode.
+The main window contains only the Answer assistant and Live transcript panels. Settings sits to the right of the answer model menu. Open Settings to use `Keep window on top` or `Compact view`. The compact view keeps the audio controls accessible. Reference files remain below the question field. The pin button requires desktop mode.
+
+The desktop window uses 92% opacity by default. Change the opacity in Settings from 50% to 100%. Reference file names retain their complete name in a hover label. Select an inline citation to read the source.
+
+### Custom process label
+
+1. Open Settings in the desktop app.
+2. Enter a custom name in `Disguise`.
+3. Select the eye button to enable the custom name.
+4. Select `Save settings`.
+
+The app saves the name across restarts. Disable the eye button and save to restore `Ghst`. The control changes the app name, window title, and main process label. Operating-system tools can retain the executable name. Renderer and helper processes retain their original names. Browser mode does not support this control.
+
 
 ## Reference limits
 
@@ -171,7 +213,7 @@ The compact view hides the transcript. Enable auto-answer in the full view befor
 | Audio request           | Complete WAV file, at most 24 MiB and 120 seconds               |
 | Answer history          | Up to twelve previous messages within a 24,000-character budget |
 | Transcript context      | Most recent 12,000 characters                                   |
-| Saved sessions          | Up to 200; export and remove old sessions as necessary          |
+| Conversation            | One active saved conversation; previous saved data remains on disk |
 
 PDF search uses local BM25 lexical search. It does not require a paid embedding service or an upstream file store. It indexes all extracted pages and adds abstract, conclusion, or limitation passages for broad questions. Short follow-up questions also use the preceding question for retrieval.
 
@@ -192,9 +234,9 @@ The application sends these data to OpenAI:
 - Retrieved PDF passages.
 - All attached Markdown skill instructions and additional instructions.
 
-The application does not upload the original PDF to an OpenAI file store. It deletes temporary audio after each request. It saves transcripts and answers locally until you delete the session. Removing a saved key does not remove an environment key.
+The application does not upload the original PDF to an OpenAI file store. It deletes temporary audio after each request. It saves transcripts and answers in the local data directory. Removing a saved key does not remove an environment key.
 
-Stop audio capture before you change or delete a session. Wait for pending requests. Quit the application before you back up or remove its data directory.
+Quit the application before you back up or remove its data directory.
 
 ## Verification
 
@@ -204,7 +246,8 @@ Run the regression suite:
 npm test
 ```
 
-The suite covers PDF passage boundaries, late-page retrieval, follow-up context, source coverage, reference removal, and complete WAV validation. Subscription checks cover provider separation, incomplete streams, cancellation, timeouts, and process cleanup.
+The suite covers PDF passage boundaries, late-page retrieval, follow-up context, source coverage, per-session reference isolation, reference removal, and complete WAV validation. Subscription checks cover provider separation, incomplete streams, cancellation, timeouts, and process cleanup.
+The agent checks cover isolated tool ownership, redirected session directories, RPC frame limits, dialog responses, persistent history, and reference synchronization. They also cover automatic maintenance, consecutive transcript answers, and separate native sessions.
 
 Local integration checks exercised a generated 180-page PDF, retrieval from page 141, reference persistence after restart, Markdown export, protected key storage, and cross-origin rejection. Browser checks exercised streamed answers, source display, automatic answers, a synthetic audio input through the AudioWorklet/WAV path, and the pending-transcript session guard. These checks used a local OpenAI protocol fixture, not real model inference.
 
@@ -214,9 +257,17 @@ A live omp check answered from an attached test PDF through `openai-codex/gpt-6-
 
 Browser checks verified the selected-model check and saved settings for each provider. The rebuilt macOS app opened with ChatGPT through omp as its default answer connection and detected the configured sign-in.
 
-The updated fallback checks exercise quota failures, partial-answer replacement, missing keys, cancellation, client disconnects, and saved answer history. An HTTP smoke check and a browser check verified the replacement answer and API charge notice with local provider fixtures.
+Persistent-agent failure checks cover quota errors, cancellation, client disconnects, and saved answer history without automatic provider replay.
 
 A real API request with reference evidence and a revised answer skill produced an answer without an irrelevant evidence-gap sentence. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified.
+
+The 31/10 browser check verified the tab-free interface, equal-size audio controls, centered upload symbol, reference upload, and consecutive transcript answers. It used a local answer fixture, not real model inference. Session creation, rename, deletion, and archived-conversation requests returned 404.
+
+An installed-runtime check confirmed automatic compaction and separate native session identities without a model prompt. The generated configuration preferred Snapcompact. This check did not trigger real compaction or model inference.
+
+Native Electron checks verified compact audio controls at 520 pixels without horizontal overflow. The Settings form changed the main process label, app name, and window title. The custom name survived a restart. Disabling disguise restored `Ghst`. A control-character name failed without a change to the saved name.
+
+The rebuilt macOS app launched with one conversation, no tabs, and the `Listen` control below `Live transcript`. Compact mode kept the microphone-device selector accessible. The regression suite passed all 86 tests.
 
 ## Landing page
 

@@ -17,6 +17,7 @@ const path = require("node:path");
     name: "Ghst",
     executableName: "Ghst",
     appBundleId: "local.ghst.desktop",
+    icon: path.join(__dirname, "ghst.icns"),
     platform: "darwin",
     arch: process.arch,
     prune: true,

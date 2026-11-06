@@ -1,4 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
+document.body.classList.toggle("desktop-mac", window.desktop?.platform === "darwin");
 let state,
   currentId,
   answering = false,
@@ -14,7 +15,197 @@ let transcriptionQueue = Promise.resolve(),
   toastTimer;
 const audioBusy = () =>
   capture || startingAudio || queuedAudio > 0 || pendingWrites > 0;
-const session = () => state?.sessions.find((item) => item.id === currentId);
+const session = () => state?.sessions[0];
+const sessionDocuments = () => state.documents.filter(doc => doc.sessionId === currentId);
+const ompProviders = {
+  chatgpt: { label: "ChatGPT subscription", prefix: "openai-codex" },
+  claude: { label: "Claude subscription", prefix: "anthropic" },
+  gemini: { label: "Gemini account", prefix: "google-gemini-cli" },
+  groq: { label: "Groq credentials", prefix: "groq" },
+};
+const defaultApiModels = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini"];
+let modelCatalog;
+let activeAnswer = null;
+const agentText = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "";
+async function agentCommand(id, command, args = {}) {
+  const result = await post(`/api/sessions/${id}/agent/command`, { command, ...args });
+  if (result?.ok === false || result?.error)
+    throw new Error(agentText(result.error || `${command} failed.`));
+  return result;
+}
+function showAgentInteraction(view, request, id) {
+  if (!request || request.id == null || view.interactions.has(request.id)) return;
+  const method = String(request.method || "").toLowerCase();
+  if (method === "cancel") {
+    const pending = view.interactions.get(request.targetId);
+    if (pending) {
+      pending.querySelectorAll("button, input, textarea, select").forEach(input => { input.disabled = true; });
+      pending.append(element("p", "", "The runtime closed this request."));
+      view.interactions.delete(request.targetId);
+    }
+    return;
+  }
+  const card = element("section", "agent-interaction");
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-label", request.title || "Agent request");
+  card.append(element("strong", "", request.title || "Agent request"));
+  if (request.message) card.append(element("p", "", agentText(request.message)));
+  const controls = element("div", "agent-actions");
+  const error = element("p", "agent-error");
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  card.append(controls, error);
+  view.node.append(card);
+  view.interactions.set(request.id, card);
+  async function respond(value) {
+    const inputs = card.querySelectorAll("button, input, textarea, select");
+    inputs.forEach(input => { input.disabled = true; });
+    error.hidden = true;
+    try {
+      await agentCommand(id, "respond", { requestId: request.id, value });
+      controls.replaceChildren(element("span", "", "Response sent."));
+      view.interactions.delete(request.id);
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.hidden = false;
+      inputs.forEach(input => { input.disabled = !answering || !view.interactions.has(request.id); });
+    }
+  }
+  function action(label, value) {
+    const button = element("button", "", label);
+    button.type = "button";
+    button.onclick = () => respond(value);
+    controls.append(button);
+  }
+  if (["confirm", "approval", "approve"].includes(method)) {
+    action("Deny", false);
+    action("Allow", true);
+  } else if (method === "select" && Array.isArray(request.options)) {
+    for (const option of request.options) {
+      const object = option !== null && typeof option === "object";
+      action(object ? agentText(option.label ?? option.title ?? option.value) : String(option),
+        object && Object.hasOwn(option, "value") ? option.value : option);
+    }
+    action("Dismiss request", null);
+  } else if (["input", "editor"].includes(method)) {
+    const input = element(method === "editor" ? "textarea" : "input");
+    input.setAttribute("aria-label", request.title || "Response");
+    input.placeholder = request.placeholder || "";
+    input.value = request.prefill ?? request.defaultValue ?? "";
+    const send = element("button", "", "Send response");
+    send.type = "button";
+    send.onclick = () => respond(input.value);
+    controls.append(input, send);
+    action("Dismiss request", null);
+  } else if (method === "ask" && Array.isArray(request.questions)) {
+    const questions = request.questions.map((question, index) => {
+      const group = element("fieldset", "agent-question");
+      group.append(element("legend", "", question.header || question.question));
+      if (question.header) group.append(element("p", "", question.question));
+      const choices = (question.options || []).map(option => {
+        const label = element("label", "agent-choice");
+        const input = element("input");
+        input.type = question.multi ? "checkbox" : "radio";
+        input.name = `agent-${request.id}-${index}`;
+        input.value = option.label;
+        label.append(input, document.createTextNode(option.label));
+        if (option.description) label.append(element("small", "", option.description));
+        if (option.preview) label.append(element("pre", "agent-payload", option.preview));
+        group.append(label);
+        return input;
+      });
+      const custom = element("textarea");
+      custom.placeholder = "Or write your own response";
+      custom.setAttribute("aria-label", `Custom response: ${question.question}`);
+      group.append(custom);
+      controls.append(group);
+      return { id: question.id, choices, custom };
+    });
+    const submit = element("button", "", "Send answers");
+    submit.type = "button";
+    submit.onclick = () => {
+      const answers = questions.map(question => ({
+        id: question.id,
+        selectedOptions: question.choices.filter(input => input.checked).map(input => input.value),
+        customInput: question.custom.value,
+      }));
+      if (answers.some(answer => !answer.selectedOptions.length && !answer.customInput.trim())) {
+        error.textContent = "Choose an option or write a response for each question.";
+        error.hidden = false;
+        return;
+      }
+      void respond({ answers });
+    };
+    controls.append(submit);
+    action("Dismiss request", null);
+  } else {
+    controls.append(element("p", "", `This runtime request (${request.method || "unknown"}) has no supported response control. Nothing was approved. Cancel the answer if it cannot continue.`));
+  }
+}
+$("#cancel-answer").onclick = async () => {
+  const active = activeAnswer;
+  if (!active) return;
+  $("#cancel-answer").disabled = true;
+  try {
+    if (ompProviders[active.provider]) await agentCommand(active.id, "cancel");
+    active.cancelled = true;
+    active.controller.abort();
+  } catch (error) {
+    notify(error.message);
+    const failure = element("p", "agent-error", `Cancellation failed: ${error.message}`);
+    failure.setAttribute("role", "alert");
+    active.view.node.append(failure);
+  } finally {
+    $("#cancel-answer").disabled = false;
+  }
+};
+async function loadModelCatalog() {
+  try { modelCatalog = await api("/api/models"); }
+  catch { modelCatalog = { subscriptionModels: [], apiModels: defaultApiModels, ollamaModels: [] }; }
+  $("#answer-models").replaceChildren(...[...(modelCatalog.apiModels || defaultApiModels), ...(modelCatalog.ollamaModels || []).map(model => `ollama:${model}`)].map(model => new Option(model, model)));
+  $("#subscription-models").replaceChildren(...(modelCatalog.subscriptionModels || []).map(model => new Option(model, model)));
+}
+function renderModelPicker() {
+  const picker = $("#answer-model-picker");
+  const settings = state.settings;
+  const groups = [];
+  for (const [provider, details] of Object.entries(ompProviders)) {
+    const selected = settings.answerProvider === provider ? settings.subscriptionModel : "";
+    const models = (modelCatalog?.subscriptionModels || []).filter(model => model.startsWith(`${details.prefix}/`));
+    groups.push([provider, `${details.label} through omp`, models, selected]);
+  }
+  const localModels = (modelCatalog?.ollamaModels || []).map(model => model.replace(/^ollama:/, ""));
+  groups.push(["openai", "OpenAI API", modelCatalog?.apiModels || defaultApiModels, settings.answerProvider === "openai" ? settings.answerModel : ""]);
+  groups.push(["ollama", "Ollama local", localModels, settings.answerProvider === "ollama" ? settings.answerModel : ""]);
+  if (settings.answerProvider === "custom")
+    groups.push(["custom", "Custom cURL — experimental", [], settings.answerModel]);
+  picker.replaceChildren();
+  for (const [provider, label, models, selected] of groups) {
+    const values = new Set([selected, ...models].filter(Boolean));
+    if (!values.size) continue;
+    const group = element("optgroup");
+    group.label = label;
+    for (const model of values) {
+      const option = new Option(model, `${provider}:${model}`);
+      option.selected = provider === settings.answerProvider && model === selected;
+      group.append(option);
+    }
+    picker.append(group);
+  }
+  picker.disabled = answering || uploading;
+}
+$("#answer-model-picker").onchange = async (event) => {
+  if (answering || uploading || audioBusy()) { renderModelPicker(); return notify("Wait for active requests before you change the model."); }
+  const [answerProvider, ...parts] = event.target.value.split(":");
+  const model = parts.join(":");
+  event.target.disabled = true;
+  try {
+    await post("/api/settings", { answerProvider, [ompProviders[answerProvider] ? "subscriptionModel" : "answerModel"]: model });
+    await refresh();
+    notify("Answer model selected.");
+  } catch (error) { notify(error.message); renderModelPicker(); }
+};
+$("#close-citation").onclick = () => $("#citation-dialog").close();
 function notify(message) {
   $("#toast").textContent = message;
   $("#toast").hidden = false;
@@ -40,6 +231,12 @@ async function api(path, options = {}) {
 }
 const post = (path, body) =>
   api(path, { method: "POST", body: JSON.stringify(body) });
+async function applyOpacity(value) {
+  const opacity = Number(value);
+  if (window.desktop?.isDesktop)
+    return window.desktop.setOpacity(opacity);
+  document.documentElement.style.opacity = String(opacity);
+}
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -48,63 +245,37 @@ function element(tag, className, text) {
 }
 async function refresh() {
   state = await api("/api/state");
-  if (!state.sessions.length)
-    state.sessions.unshift(
-      await post("/api/sessions", {
-        title: `Intel · ${new Date().toLocaleDateString()}`,
-      }),
-    );
-  if (!state.sessions.some((item) => item.id === currentId))
-    currentId = state.sessions[0].id;
+  await applyOpacity(state.settings.opacity);
+  await loadModelCatalog();
+  currentId = session().id;
   render();
 }
 function render() {
   renderLibrary();
-  renderSessions();
   renderMessages();
   renderTranscript();
-  const subscription = state.settings.answerProvider === "chatgpt";
-  const ready = subscription ? state.subscription?.connected || state.configured : state.configured;
-  $("#connection").textContent = subscription
-    ? ready
-      ? state.subscription?.connected ? "ChatGPT through omp" : "API fallback available"
-      : "Connect ChatGPT"
-    : ready
-      ? "API key configured"
-      : "API key required";
-  $("#connection").classList.toggle("connected", Boolean(ready));
-  $("#connection").title =
-    `Answers: ${subscription ? "ChatGPT through omp with automatic API fallback" : "OpenAI API credits"}. Transcription: ${state.configured ? "API key configured" : "API key required"}.`;
-  $("#model-label").textContent = subscription
-    ? state.settings.subscriptionModel
-    : state.settings.answerModel;
-  $("#session-title").textContent = session().title;
-  $("#context-label").textContent = state.documents.length
-    ? `${state.documents.length} reference${state.documents.length === 1 ? "" : "s"} in context`
+  renderModelPicker();
+  const documents = sessionDocuments();
+  $("#context-label").textContent = documents.length
+    ? `${documents.length} reference${documents.length === 1 ? "" : "s"} attached`
     : "No references attached";
 }
 function renderLibrary() {
   $("#documents").replaceChildren();
-  $("#document-count").textContent = state.documents.length;
-  for (const doc of state.documents) {
+  const documents = sessionDocuments();
+  for (const doc of documents) {
     const row = element("div", `document ${doc.type}`);
+    row.setAttribute("role", "listitem");
     row.append(
       element("span", "document-icon", doc.type === "pdf" ? "PDF" : "MD"),
     );
     const info = element("div", "document-info");
     const name = element("span", "document-name", doc.name);
     name.title = doc.name;
-    info.append(
-      name,
-      element(
-        "span",
-        "document-meta",
-        doc.type === "pdf"
-          ? `${doc.pages} pages · Indexed locally`
-          : "Skill instructions · Active",
-      ),
-    );
+    info.append(name);
+    row.title = doc.type === "pdf" ? `${doc.name} · ${doc.pages} pages` : `${doc.name} · Markdown instructions`;
     const remove = element("button", "", "×");
+    remove.type = "button";
     remove.title = `Remove ${doc.name}`;
     remove.setAttribute("aria-label", remove.title);
     remove.onclick = async () => {
@@ -112,50 +283,15 @@ function renderLibrary() {
         return notify("Wait for the current request to finish.");
       if (!confirm(`Remove ${doc.name} from the context library?`)) return;
       try {
-        await api(`/api/documents/${doc.id}`, { method: "DELETE" });
+        await api(`/api/sessions/${doc.sessionId}/documents/${doc.id}`, { method: "DELETE" });
         await refresh();
+        $("#upload-files").focus();
       } catch (error) {
         notify(error.message);
       }
     };
     row.append(info, remove);
     $("#documents").append(row);
-  }
-}
-function renderSessions() {
-  $("#sessions").replaceChildren();
-  for (const item of state.sessions) {
-    const row = element(
-      "div",
-      `session-row ${item.id === currentId ? "active" : ""}`,
-    );
-    const choose = element("button", "", item.title);
-    choose.title = new Date(item.createdAt).toLocaleString();
-    choose.onclick = () => {
-      if (answering || audioBusy())
-        return notify(
-          "Stop audio capture and wait for requests before you change the session.",
-        );
-      currentId = item.id;
-      render();
-    };
-    const remove = element("button", "delete-session", "×");
-    remove.setAttribute("aria-label", `Delete ${item.title}`);
-    remove.onclick = async () => {
-      if (answering || audioBusy())
-        return notify(
-          "Stop audio capture and wait for requests before you delete a session.",
-        );
-      if (!confirm("Delete this session and its transcript?")) return;
-      try {
-        await api(`/api/sessions/${item.id}`, { method: "DELETE" });
-        await refresh();
-      } catch (error) {
-        notify(error.message);
-      }
-    };
-    row.append(choose, remove);
-    $("#sessions").append(row);
   }
 }
 function addMessage(message) {
@@ -167,9 +303,11 @@ function addMessage(message) {
       message.role === "user" ? "YOUR QUESTION" : "✧  SUGGESTED ANSWER",
     ),
   );
-  const content = element("div", "message-content", message.text);
+  const content = element("div", "message-content");
   node.append(content);
-  if (message.sources?.length) addSources(node, message.sources);
+  node.citationSources = message.sources || [];
+  if (message.role === "assistant") renderAnswerContent(content, message.text, node.citationSources);
+  else content.textContent = message.text;
   if (message.role === "assistant") {
     const actions = element("div", "message-actions");
     const copy = element("button", "text-button", "Copy answer");
@@ -185,24 +323,29 @@ function addMessage(message) {
     node.append(actions);
   }
   $("#messages").append(node);
-  return { node, content };
+  return { node, content, interactions: new Map() };
 }
-function addSources(node, sources) {
-  node.querySelector(".source-list")?.remove();
-  const list = element("div", "source-list");
-  sources.forEach((source, index) => {
-    const details = element("details");
-    details.append(
-      element(
-        "summary",
-        "",
-        `[${index + 1}] ${source.name}${source.page ? ` · Page ${source.page}` : ""}`,
-      ),
-      element("p", "", source.text),
-    );
-    list.append(details);
-  });
-  node.append(list);
+function renderAnswerContent(content, text, sources = []) {
+  const fragment = document.createDocumentFragment();
+  let start = 0;
+  for (const match of text.matchAll(/\[(\d+)\]/g)) {
+    fragment.append(document.createTextNode(text.slice(start, match.index)));
+    const source = sources[Number(match[1]) - 1];
+    if (source) {
+      const button = element("button", "citation-button", match[0]);
+      button.type = "button";
+      button.setAttribute("aria-label", `Reference ${match[1]}`);
+      button.onclick = () => {
+        $("#citation-title").textContent = `${match[0]} ${source.name}${source.page ? ` · Page ${source.page}` : ""}`;
+        $("#citation-text").textContent = source.text;
+        $("#citation-dialog").showModal();
+      };
+      fragment.append(button);
+    } else fragment.append(document.createTextNode(match[0]));
+    start = match.index + match[0].length;
+  }
+  fragment.append(document.createTextNode(text.slice(start)));
+  content.replaceChildren(fragment);
 }
 function renderMessages() {
   $("#messages").replaceChildren();
@@ -255,6 +398,7 @@ async function upload(files) {
   if (uploading || answering)
     return notify("Wait for the current request to finish.");
   if (!files.length) return;
+  const ownerId = currentId;
   const form = new FormData();
   for (const file of files) {
     if (!/\.(pdf|md)$/i.test(file.name))
@@ -264,62 +408,78 @@ async function upload(files) {
     form.append("files", file);
   }
   uploading = true;
-  $("#upload-label").textContent = "Read and index references…";
+  $("#upload-label").textContent = "Reading and indexing references…";
+  $("#upload-files").disabled = true;
   $("#files").disabled = true;
   try {
-    await api("/api/documents", { method: "POST", body: form });
+    await api(`/api/sessions/${ownerId}/documents`, { method: "POST", body: form });
     await refresh();
     notify("References are ready.");
   } catch (error) {
     notify(error.message);
   } finally {
     uploading = false;
-    $("#upload-label").textContent = "Add files";
+    $("#upload-label").textContent = "";
+    $("#upload-files").disabled = false;
     $("#files").disabled = false;
     $("#files").value = "";
+    renderModelPicker();
   }
 }
 $("#files").onchange = (event) => upload([...event.target.files]);
+$("#upload-files").onclick = () => $("#files").click();
 for (const name of ["dragover", "dragleave", "drop"])
   $("#upload-zone").addEventListener(name, (event) => {
     event.preventDefault();
     $("#upload-zone").classList.toggle("dragover", name === "dragover");
     if (name === "drop") upload([...event.dataTransfer.files]);
   });
-$("#new-session").onclick = async () => {
-  if (answering || audioBusy())
-    return notify(
-      "Stop audio capture and wait for requests before you start a new session.",
-    );
-  try {
-    const item = await post("/api/sessions", {
-      title: `Intel · ${new Date().toLocaleDateString()}`,
-    });
-    currentId = item.id;
-    await refresh();
-  } catch (error) {
-    notify(error.message);
-  }
-};
-$("#toggle-sidebar").onclick = () => {
-  const open = document.body.classList.toggle("sidebar-open");
-  $("#toggle-sidebar").setAttribute("aria-expanded", open);
-  $("#toggle-sidebar").setAttribute(
-    "aria-label",
-    open ? "Close context library" : "Open context library",
-  );
-};
-$("#workspace-link").onclick = () => $("#question").focus();
-$("#export").onclick = () => {
-  if (session()) window.location.href = `/api/sessions/${currentId}/export`;
-};
 let subscriptionPreview = null;
-function openSettings() {
+let disguiseAvailable = false;
+let disguiseEnabled = false;
+function renderDisguise() {
+  $("#disguise-toggle").disabled = !disguiseAvailable;
+  $("#disguise-toggle").setAttribute("aria-pressed", String(disguiseEnabled));
+  $("#disguise-name").disabled = !disguiseAvailable || !disguiseEnabled;
+  $("#disguise-name").required = disguiseAvailable && disguiseEnabled;
+  $("#disguise-status").textContent = disguiseAvailable
+    ? disguiseEnabled ? "Disguise enabled. Save settings to apply." : "Disguise off. Save settings to restore Ghst."
+    : "Requires the desktop app.";
+}
+async function loadDisguise() {
+  disguiseAvailable = false;
+  disguiseEnabled = false;
+  $("#disguise-name").value = "";
+  renderDisguise();
+  if (typeof window.desktop?.getDisguise !== "function" ||
+      typeof window.desktop?.setDisguise !== "function") return;
+  try {
+    const disguise = await window.desktop.getDisguise();
+    disguiseAvailable = true;
+    disguiseEnabled = disguise.enabled;
+    $("#disguise-name").value = disguise.name;
+    renderDisguise();
+  } catch (error) {
+    $("#disguise-status").textContent = `Cannot read desktop disguise settings: ${error.message}`;
+  }
+}
+$("#disguise-toggle").onclick = () => {
+  if (!disguiseAvailable) return;
+  disguiseEnabled = !disguiseEnabled;
+  renderDisguise();
+  if (disguiseEnabled) $("#disguise-name").focus();
+};
+async function openSettings() {
+  if (!state) return notify("Wait for the application to load.");
   const settings = state.settings;
-  $("#api-key").value = "";
-  $("#api-key").placeholder = state.configured
-    ? "Key configured. Leave blank to keep it."
-    : "sk-…";
+  const secrets = await api("/api/key");
+  $("#api-key").type = "password";
+  $("#api-key").value = secrets.apiKey;
+  $("#custom-curl").value = secrets.customCurl;
+  $("#ollama-url").value = settings.ollamaUrl;
+  $("#transcribe-url").value = settings.transcribeUrl;
+  $("#transcribe-provider").value = settings.transcribeProvider;
+  $("#local-transcribe-model").value = settings.transcribeProvider === "local" ? settings.transcribeModel : "whisper";
   $("#answer-provider").value = settings.answerProvider;
   $("#subscription-model").value = settings.subscriptionModel;
   subscriptionPreview = state.subscription;
@@ -327,14 +487,19 @@ function openSettings() {
   $("#answer-model").value = settings.answerModel;
   $("#transcribe-model").value = settings.transcribeModel;
   $("#language").value = settings.language;
-  $("#instructions").value = settings.instructions;
+  renderTranscriptionSettings();
+  const opacityPercent = Math.round(settings.opacity * 100);
+  $("#window-opacity").value = String(opacityPercent);
+  $("#window-opacity-value").value = `${opacityPercent}%`;
+  await loadDisguise();
   $("#settings-dialog").showModal();
 }
 function renderProviderSettings() {
-  const useSubscription = $("#answer-provider").value === "chatgpt";
-  $("#subscription-settings").hidden = !useSubscription;
-  $("#api-answer-settings").hidden = false;
-  $("#subscription-model").required = useSubscription;
+  const details = ompProviders[$("#answer-provider").value];
+  $("#subscription-settings").hidden = !details;
+  $("#custom-settings").hidden = $("#answer-provider").value !== "custom";
+  $("#subscription-model").required = Boolean(details);
+  $("#omp-login-command").textContent = details ? `omp login ${details.prefix}` : "";
   const status = subscriptionPreview;
   $("#subscription-status").textContent =
     status?.model !== $("#subscription-model").value.trim()
@@ -347,7 +512,23 @@ function renderProviderSettings() {
             : "Install omp and sign in to openai-codex.");
 }
 $("#subscription-model").oninput = renderProviderSettings;
-$("#answer-provider").onchange = renderProviderSettings;
+$("#answer-provider").onchange = () => {
+  const details = ompProviders[$("#answer-provider").value];
+  if (details && !$("#subscription-model").value.startsWith(`${details.prefix}/`)) $("#subscription-model").value = `${details.prefix}/`;
+  renderProviderSettings();
+};
+function renderTranscriptionSettings() {
+  const local = $("#transcribe-provider").value === "local";
+  $("#local-transcription-settings").hidden = !local;
+  $("#openai-transcription-settings").hidden = local;
+}
+$("#transcribe-provider").onchange = renderTranscriptionSettings;
+$("#toggle-key").onclick = () => {
+  const reveal = $("#api-key").type === "password";
+  $("#api-key").type = reveal ? "text" : "password";
+  $("#toggle-key").setAttribute("aria-label", reveal ? "Hide key" : "Show key");
+  $("#toggle-key").setAttribute("aria-pressed", String(reveal));
+};
 $("#check-subscription").onclick = async () => {
   $("#check-subscription").disabled = true;
   $("#subscription-status").textContent = "Check the omp connection…";
@@ -366,25 +547,48 @@ $("#check-subscription").onclick = async () => {
     $("#check-subscription").disabled = false;
   }
 };
-$("#settings").onclick = openSettings;
-$("#connection").onclick = openSettings;
-$("#connection").style.cursor = "pointer";
+$("#settings").onclick = () => openSettings().catch((error) => notify(error.message));
 $("#close-settings").onclick = () => $("#settings-dialog").close();
+$("#settings-dialog").addEventListener("close", () => {
+  if (state)
+    void applyOpacity(state.settings.opacity).catch((error) =>
+      notify(error.message),
+    );
+});
+$("#window-opacity").oninput = () => {
+  const opacity = Number($("#window-opacity").value) / 100;
+  $("#window-opacity-value").value = `${Math.round(opacity * 100)}%`;
+  void applyOpacity(opacity).catch((error) => notify(error.message));
+};
 $("#settings-form").onsubmit = async (event) => {
   event.preventDefault();
+  if (answering) return notify("Wait for the answer to finish or cancel it before saving settings.");
   $("#save-settings").disabled = true;
   const settings = {
     answerProvider: $("#answer-provider").value,
-    transcribeModel: $("#transcribe-model").value,
+    transcribeProvider: $("#transcribe-provider").value,
+    transcribeModel: $("#transcribe-provider").value === "local" ? $("#local-transcribe-model").value.trim() : $("#transcribe-model").value,
+    transcribeUrl: $("#transcribe-url").value,
+    ollamaUrl: $("#ollama-url").value,
     language: $("#language").value.trim(),
-    instructions: $("#instructions").value,
+    opacity: Number($("#window-opacity").value) / 100,
   };
-  if (settings.answerProvider === "chatgpt")
+  if (ompProviders[settings.answerProvider])
     settings.subscriptionModel = $("#subscription-model").value.trim();
   settings.answerModel = $("#answer-model").value;
+  if ($("#custom-curl").value.trim()) settings.customCurl = $("#custom-curl").value.trim();
   if ($("#api-key").value.trim()) settings.apiKey = $("#api-key").value.trim();
   try {
     await post("/api/settings", settings);
+    if (disguiseAvailable) {
+      const disguise = await window.desktop.setDisguise({
+        enabled: disguiseEnabled,
+        name: $("#disguise-name").value.trim(),
+      });
+      disguiseEnabled = disguise.enabled;
+      $("#disguise-name").value = disguise.name;
+      renderDisguise();
+    }
     await refresh();
     $("#settings-dialog").close();
     $("#api-key").value = "";
@@ -395,36 +599,11 @@ $("#settings-form").onsubmit = async (event) => {
     $("#save-settings").disabled = false;
   }
 };
-$("#remove-key").onclick = async () => {
-  if (
-    !confirm(
-      "Remove the saved OpenAI API key? An environment key, if set, remains active.",
-    )
-  )
-    return;
-  try {
-    await api("/api/key", { method: "DELETE" });
-    await refresh();
-    openSettingsAfterClose();
-    notify("Saved key removed.");
-  } catch (error) {
-    notify(error.message);
-  }
-};
-function openSettingsAfterClose() {
-  $("#settings-dialog").close();
-  openSettings();
-}
 function enqueueAnswer(question, id = currentId) {
   question = question.trim();
   if (!question) return;
-  const subscription = state.settings.answerProvider === "chatgpt";
-  if (subscription ? !state.subscription?.connected && !state.configured : !state.configured) {
-    notify(
-      subscription
-        ? "Connect ChatGPT in omp or add an API key for automatic fallback."
-        : "Add an OpenAI API key in settings first.",
-    );
+  if (state.settings.answerProvider === "openai" && !state.configured) {
+    notify("Add an OpenAI API key in settings first.");
     openSettings();
     return;
   }
@@ -436,11 +615,17 @@ function enqueueAnswer(question, id = currentId) {
 async function answer(question, id, answerProvider) {
   if (id !== currentId) return;
   answering = true;
+  $("#answer-activity").hidden = false;
+  $("#cancel-answer").disabled = false;
   $("#ask").disabled = true;
+  $("#answer-model-picker").disabled = true;
   $("#working").hidden = false;
   $("#messages .welcome")?.remove();
   addMessage({ role: "user", text: question });
   const view = addMessage({ role: "assistant", text: "" });
+  const active = { id, provider: answerProvider, controller: new AbortController(), cancelled: false, view };
+  activeAnswer = active;
+  let reader;
   let fullText = "",
     completed = false;
   try {
@@ -448,38 +633,40 @@ async function answer(question, id, answerProvider) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, answerProvider }),
+      signal: active.controller.signal,
     });
     if (!response.ok) {
       const data = await response.json();
       throw new Error(data.error || "The answer request failed.");
     }
-    const reader = response.body.getReader(),
-      decoder = new TextDecoder();
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
     let buffer = "";
     function consume(line) {
       if (!line.trim()) return;
       const event = JSON.parse(line);
       if (event.type === "error") throw new Error(event.error);
-      if (event.type === "sources") addSources(view.node, event.sources);
-      if (event.type === "reset") {
-        fullText = "";
-        view.content.textContent = "";
-        $("#working").hidden = false;
+      if (event.type === "sources") view.node.citationSources = event.sources;
+      if (event.type === "agent") {
+        if (event.event?.method === "cancel") showAgentInteraction(view, event.event, id);
       }
-      if (event.type === "fallback") {
-        notify("Subscription unavailable. This answer uses OpenAI API credits.");
-        $("#model-label").textContent = `${state.settings.answerModel} · API fallback`;
-      }
+      if (event.type === "interaction") showAgentInteraction(view, event.request, id);
       if (event.type === "delta") {
         fullText += event.text;
-        view.content.textContent = fullText;
+        renderAnswerContent(view.content, fullText, view.node.citationSources);
         $("#working").hidden = true;
       }
       if (event.type === "done") completed = true;
       $("#messages").scrollTop = $("#messages").scrollHeight;
     }
+    const aborted = new Promise((resolve) => {
+      active.controller.signal.addEventListener("abort", () => resolve({ aborted: true }), { once: true });
+    });
     while (true) {
-      const chunk = await reader.read();
+      const pending = reader.read();
+      pending.catch(() => {});
+      const chunk = await Promise.race([pending, aborted]);
+      if (chunk.aborted) throw new Error("The answer was cancelled.");
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
       let boundary;
@@ -497,17 +684,27 @@ async function answer(question, id, answerProvider) {
       );
     await refresh();
   } catch (error) {
-    view.content.textContent = `${fullText ? `${fullText}\n\n` : ""}Answer failed: ${error.message}`;
-    notify(error.message);
+    view.content.textContent = `${fullText ? `${fullText}\n\n` : ""}${active.cancelled ? "Answer cancelled." : `Answer failed: ${error.message}`}`;
+    if (!active.cancelled) notify(error.message);
     try {
       state = await api("/api/state");
     } catch {
       /* Keep the visible error when the server is unavailable. */
     }
   } finally {
+    if (reader) {
+      try { await reader.cancel(); } catch { /* The stream may already be closed. */ }
+    }
+    for (const card of view.interactions.values()) {
+      card.querySelectorAll("button, input, textarea, select").forEach(input => { input.disabled = true; });
+      card.append(element("p", "", "This answer has ended; the request is no longer active."));
+    }
+    activeAnswer = null;
     answering = false;
     $("#ask").disabled = false;
     $("#working").hidden = true;
+    $("#answer-model-picker").disabled = false;
+    $("#answer-activity").hidden = true;
   }
 }
 $("#question-form").onsubmit = (event) => {
@@ -516,13 +713,6 @@ $("#question-form").onsubmit = (event) => {
   if (!text || answering) return;
   $("#question").value = "";
   enqueueAnswer(text);
-};
-$("#messages").onclick = (event) => {
-  const suggestion = event.target.closest("[data-question]");
-  if (suggestion) {
-    $("#question").value = suggestion.dataset.question;
-    $("#question").focus();
-  }
 };
 $("#use-transcript").onclick = () => {
   const latest = session().transcript.at(-1);
@@ -586,18 +776,10 @@ window.addEventListener("keydown", (event) => {
   if (
     (event.metaKey || event.ctrlKey) &&
     event.key === "Enter" &&
-    !$("#settings-dialog").open
+    !document.querySelector("dialog[open]")
   ) {
     event.preventDefault();
     $("#question-form").requestSubmit();
-  }
-  if (
-    (event.metaKey || event.ctrlKey) &&
-    event.key.toLowerCase() === "k" &&
-    !$("#settings-dialog").open
-  ) {
-    event.preventDefault();
-    $("#new-session").click();
   }
 });
 async function enumerateDevices() {
@@ -665,7 +847,7 @@ function submitAudio(chunks, rate, id) {
   }
   const blob = wavBlob(chunks, rate);
   queuedAudio++;
-  $("#session-subtitle").textContent =
+  $("#audio-status").textContent =
     `${queuedAudio} audio segment${queuedAudio === 1 ? "" : "s"} to transcribe`;
   transcriptionQueue = transcriptionQueue
     .then(async () => {
@@ -683,7 +865,7 @@ function submitAudio(chunks, rate, id) {
     })
     .finally(() => {
       queuedAudio--;
-      $("#session-subtitle").textContent = queuedAudio
+      $("#audio-status").textContent = queuedAudio
         ? `${queuedAudio} audio segments to transcribe`
         : capture
           ? "Audio capture active"
@@ -731,17 +913,13 @@ function flushAudio(target) {
   if (voiced >= 0.3) submitAudio(chunks, target.context.sampleRate, target.id);
 }
 function activateCapture(target) {
-  $("#listen").innerHTML = '<span class="record-dot"></span> Stop listening';
+  $("#listen").textContent = "Stop";
   $("#listen").classList.add("recording");
   $("#live-label").textContent = "LIVE";
   $("#live-label").classList.add("active");
-  $("#session-indicator").classList.add("active");
   $("#audio-source").disabled = true;
   $("#audio-device").disabled = true;
-  $("#session-subtitle").textContent = target.nativeZoom ? "Zoom output capture active" : "Audio capture active";
-  $("#audio-note").textContent = target.nativeZoom
-    ? "Zoom output only. No local microphone input."
-    : "Speech segments go to OpenAI after a pause.";
+  $("#audio-status").textContent = target.nativeZoom ? "Zoom output capture active" : "Audio capture active";
   target.timer = setInterval(() => {
     const seconds = Math.floor((Date.now() - target.start) / 1000);
     $("#timer").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -780,7 +958,7 @@ async function startZoomCapture() {
   }
 }
 async function startCapture() {
-  if (!state.configured) {
+  if (state.settings.transcribeProvider !== "local" && !state.configured) {
     notify("Add an OpenAI API key before you start transcription.");
     openSettings();
     return;
@@ -888,22 +1066,20 @@ function stopCapture() {
     target.stream.getTracks().forEach((track) => track.stop());
     target.context.close();
   }
-  $("#listen").innerHTML = '<span class="record-dot"></span> Start listening';
+  $("#listen").textContent = "Listen";
   $("#listen").classList.remove("recording");
   $("#live-label").textContent = "OFFLINE";
   $("#live-label").classList.remove("active");
-  $("#session-indicator").classList.remove("active");
   $("#audio-source").disabled = false;
   $("#audio-device").disabled = false;
   $("#audio-level").style.width = "0%";
-  $("#session-subtitle").textContent = queuedAudio
+  $("#audio-status").textContent = queuedAudio
     ? `${queuedAudio} audio segments to transcribe`
     : "Ready when you are";
-  $("#audio-note").textContent = "Audio goes to OpenAI for transcription.";
 }
 $("#listen").onclick = () => (capture ? stopCapture() : startCapture());
 window.addEventListener("beforeunload", (event) => {
-  if (capture || queuedAudio || answering) {
+  if (audioBusy() || answering || uploading) {
     event.preventDefault();
     event.returnValue = "";
   }
