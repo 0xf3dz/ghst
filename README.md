@@ -217,3 +217,7 @@ Browser checks verified the selected-model check and saved settings for each pro
 The updated fallback checks exercise quota failures, partial-answer replacement, missing keys, cancellation, client disconnects, and saved answer history. An HTTP smoke check and a browser check verified the replacement answer and API charge notice with local provider fixtures.
 
 A real API request with reference evidence and a revised answer skill produced an answer without an irrelevant evidence-gap sentence. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified.
+
+## Landing page
+
+The static landing page is in `site/`. It does not need a build step. Set `site/` as the document root on a static host. Configure `ghst.f3dz.sh` and HTTPS through that host.
