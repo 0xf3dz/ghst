@@ -1,6 +1,8 @@
 ﻿# Ghst
 
-A local desktop assistant for thesis-defense questions. The app window and packaged executable use the name `Ghst`.
+A local desktop assistant for meetings and thesis-defense questions. Ghst transcribes audio and answers questions with your PDF references and Markdown instructions.
+
+![Ghst with the Answer assistant and Live transcript panels](site/assets/ghst-app.png)
 
 The app icon uses an enlarged white ghost on a solid black background, derived from the [supplied ghost animation](https://x.com/stackedlol/status/2112710842865041666). The main app screen does not display the logo. Icon assets reside in `public/assets/ghst-logo.png` and `desktop/ghst.icns`.
 
@@ -8,8 +10,8 @@ The app icon uses an enlarged white ghost on a solid black background, derived f
 
 - System audio capture for a Zoom call through the desktop app.
 - Microphone or virtual loopback input as a second audio source.
-- Speech transcription with `gpt-4o-transcribe` or `gpt-4o-mini-transcribe`.
-- ChatGPT subscription answers through your installed `omp` and its `openai-codex` connection.
+- Speech transcription through the OpenAI API or a local whisper.cpp server.
+- Answers through omp accounts, the OpenAI API, Ollama, or an experimental custom HTTP connection.
 - Local PDF text extraction and search, with source passages and PDF page numbers.
 - A local reference library for the saved conversation.
 - Full Markdown skill instructions in each answer request.
@@ -17,15 +19,15 @@ The app icon uses an enlarged white ghost on a solid black background, derived f
 - Saved transcripts and questions for later discussion.
 - A compact view and a translucent desktop window that stays on top.
 - Two main panels, with Settings beside the answer model menu.
-- Reference files and a local upload button below the question field.
+- A single-row question field, with reference files and a `+` upload button below it.
 
 The interface follows the reference-library, transcript, and answer workflow of [Natively](https://github.com/Natively-AI-assistant/natively-cluely-ai-assistant). This application contains an independent implementation. It does not include Natively code, branding, or a hidden window.
 
 ## Requirements
 
 - Node.js 22.12 or later.
-- An OpenAI API key with API credit for OpenAI transcription or direct API answers.
-- An installed `omp` with a ChatGPT sign-in for subscription answers.
+- An answer connection. Use an installed `omp` with a supported account, an OpenAI API key, or an Ollama server.
+- A transcription connection. Use an OpenAI API key with API credit or a local whisper.cpp server.
 - macOS 14.2 or later for native system audio capture. Windows supports Electron loopback capture. Linux requires a virtual loopback or monitor input.
 - Xcode Command Line Tools with the macOS 15 SDK or later to build the Zoom audio helper. The packaged app includes this helper.
 - A searchable thesis PDF. Image-only PDFs require optical character recognition (OCR) before upload.
@@ -63,18 +65,20 @@ dist/Ghst-darwin-arm64/Ghst.app
 
 On an Intel host, the output directory ends with `darwin-x64`. The build uses the host architecture. This local app has no Developer ID signature or notarization. Do not use this command to prepare a public release.
 
-## Configure a defense session
+## Configure the application
 
 1. In your terminal, run `omp login openai-codex` and complete the browser sign-in.
 2. Open Settings with the gear button beside the answer model menu.
-3. Select `ChatGPT subscription through omp` and select `Check connection`.
-4. Enter your OpenAI API key for transcription and select a transcription model.
-5. If necessary, enter a transcription language code such as `en` or `pt`.
+3. Select `ChatGPT — OpenAI subscription through omp` and select `Check connection`.
+4. Select `OpenAI API` as the transcription provider and enter your API key.
+5. Select a transcription model. If necessary, enter a language code such as `en` or `pt`.
 6. Save the settings.
 7. Select `+` below the question field and attach your PDF.
 8. Attach your Markdown skill files.
 9. Select an audio source.
 10. Select `Listen` below `Live transcript`.
+
+For another answer connection or local transcription, use the connection instructions below. Answers and transcription use separate provider settings.
 
 The `skills/` directory includes two optional files:
 
@@ -187,7 +191,11 @@ Auto-answer is off by default. It processes speech segments, not speaker identit
 
 The audio processor detects speech energy and waits approximately 1.15 seconds after a pause. It also divides continuous speech at approximately 22 seconds. It sends each segment as a complete mono WAV file. These are successive transcription requests, not token-by-token realtime transcription. The application stops capture if the transcription queue cannot keep up and reports the problem.
 
-The main window contains only the Answer assistant and Live transcript panels. Settings sits to the right of the answer model menu. Open Settings to use `Keep window on top` or `Compact view`. The compact view keeps the audio controls accessible. Reference files remain below the question field. The pin button requires desktop mode.
+The main window contains only the Answer assistant and Live transcript panels. Settings sits to the right of the answer model menu.
+
+Open Settings to use `Keep window on top` or `Compact view`. These controls apply immediately without `Save settings`. The pin button requires desktop mode.
+
+The compact view keeps the audio controls accessible. Reference files and the `+` upload button remain below the question field.
 
 The desktop window uses 92% opacity by default. Change the opacity in Settings from 50% to 100%. Reference file names retain their complete name in a hover label. Select an inline citation to read the source.
 
@@ -207,17 +215,24 @@ The app saves the name across restarts. Disable the eye button and save to resto
 | ----------------------- | --------------------------------------------------------------- |
 | PDF upload              | 100 MiB per file; eight files per request                       |
 | PDF extraction          | 10,000 pages and 50 million extracted characters per file       |
-| PDF evidence per answer | Up to six passages, each up to 1,600 characters                 |
+| Initial PDF evidence    | Up to six passages, each up to 1,600 characters                 |
 | Markdown skill          | 32,000 characters per file; 64,000 characters across all skills |
-| Additional instructions | 16,000 characters                                               |
 | Audio request           | Complete WAV file, at most 24 MiB and 120 seconds               |
-| Answer history          | Up to twelve previous messages within a 24,000-character budget |
+| API and local answer history | Up to twelve previous messages within 24,000 characters for OpenAI API, Ollama, and custom requests |
 | Transcript context      | Most recent 12,000 characters                                   |
 | Conversation            | One active saved conversation; previous saved data remains on disk |
 
 PDF search uses local BM25 lexical search. It does not require a paid embedding service or an upstream file store. It indexes all extracted pages and adds abstract, conclusion, or limitation passages for broad questions. Short follow-up questions also use the preceding question for retrieval.
 
-The model receives selected passages, not the complete PDF. Search can miss synonyms, image content, equations, or evidence spread across many pages. A source list identifies retrieved passages; it does not prove that every generated claim follows from them. Check each answer against the thesis. Page numbers refer to the physical PDF page, which can differ from the printed page label.
+Each answer initially receives selected passages. omp agents can also read all extracted PDF text from their session workspace.
+
+OpenAI API, Ollama, and custom answers receive the selected passages rather than the complete PDF text. The original PDF stays on your device.
+
+omp retains native conversation history and applies automatic compaction. The application history limit applies only to the initial history supplied to a native session.
+
+Search can miss synonyms, image content, equations, or evidence spread across many pages. A source list identifies retrieved passages. It does not prove that each generated claim follows from them.
+
+Check each answer against the thesis. Page numbers refer to the physical PDF page, which can differ from the printed page label.
 
 ## Local data and privacy
 
@@ -225,16 +240,25 @@ The default data directory is `~/.thesis-assistant`. Set `THESIS_DATA_DIR` befor
 
 The server listens on `127.0.0.1` only. It rejects cross-origin requests and unrecognized host headers. It does not return the saved API key through the state endpoint.
 
-The saved API key resides in `state.json`. The application restricts the directory to mode `0700` and saved files to `0600`. The key is not encrypted at rest. Do not share or commit this directory. Other processes under your user account can read it. Use `OPENAI_API_KEY` if you do not want the app to save a key. The environment key takes precedence over a saved key.
+The saved API key resides in `state.json`. The application restricts the directory to mode `0700` and saved files to `0600`. The key is not encrypted at rest.
 
-The application sends these data to OpenAI:
+Do not share or commit this directory. Other processes under your user account can read it.
 
-- Audio speech segments for transcription.
-- Your current question and bounded conversation context.
-- Retrieved PDF passages.
-- All attached Markdown skill instructions and additional instructions.
+Use `OPENAI_API_KEY` if you do not want the app to save a key. A saved key takes precedence over the environment key.
 
-The application does not upload the original PDF to an OpenAI file store. It deletes temporary audio after each request. It saves transcripts and answers in the local data directory. Removing a saved key does not remove an environment key.
+The application sends data to the selected connections:
+
+| Connection | Data sent |
+| ---------- | --------- |
+| OpenAI transcription or the configured Whisper endpoint | Audio speech segments and transcription options |
+| Selected answer provider or endpoint | Your question, conversation context, selected PDF passages, and attached Markdown skills |
+| omp answer provider | Additional PDF text that the agent reads from the session workspace |
+
+Ollama and Whisper process data locally only when you configure services on your device. A remote service receives the data sent to its URL.
+
+The application does not upload the original PDF to an OpenAI file store. It deletes temporary audio after each request. It saves transcripts and answers in the local data directory.
+
+An empty API-key field preserves the saved key. To remove it, quit Ghst and clear the `apiKey` value in `state.json`. This does not remove `OPENAI_API_KEY` from your environment.
 
 Quit the application before you back up or remove its data directory.
 
@@ -271,4 +295,28 @@ The rebuilt macOS app launched with one conversation, no tabs, and the `Listen` 
 
 ## Landing page
 
-The static landing page is in `site/`. It does not need a build step. Set `site/` as the document root on a static host. Configure `ghst.f3dz.sh` and HTTPS through that host.
+The static landing page resides in `site/`. It includes an app screenshot and links to the GitHub repository. It requires no build step.
+
+### Local preview
+
+From the repository root, run:
+
+```sh
+python3 -m http.server 18765 --bind 127.0.0.1 --directory site
+```
+
+Open `http://127.0.0.1:18765`. Stop the preview with Control+C. Python 3 is necessary only for this preview command.
+
+### Deployment
+
+1. Configure a static host with `site/` as its document root.
+2. Add `ghst.f3dz.sh` as a custom domain on the host.
+3. Add the DNS record that the host supplies.
+4. Enable HTTPS and check the domain.
+
+You need access to the static host and the DNS configuration for `f3dz.sh`. The repository does not configure these services.
+
+Publish only `site/`. Do not expose the local application server or the data directory on the public host.
+
+The primary page action links to GitHub. The repository does not include a signed application download for public distribution.
+
