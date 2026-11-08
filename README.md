@@ -11,9 +11,11 @@ The app icon uses an enlarged white ghost on a solid black background, derived f
 - System audio capture for a Zoom call through the desktop app.
 - Microphone or virtual loopback input as a second audio source.
 - Speech transcription through the OpenAI API or a local whisper.cpp server.
+- Live OpenAI streaming that writes partial words while you speak.
 - Answers through omp accounts, the OpenAI API, Ollama, or an experimental custom HTTP connection.
-- Local PDF text extraction and search, with source passages and PDF page numbers.
+- Local PDF text extraction, with the omp agent reading the extracted pages.
 - A local reference library for the saved conversation.
+- Answers that cite the reference filename and verified PDF page.
 - Full Markdown skill instructions in each answer request.
 - Streamed answers, manual questions, and optional automatic answers after speech segments.
 - Saved transcripts and questions for later discussion.
@@ -32,7 +34,7 @@ The interface follows the reference-library, transcript, and answer workflow of 
 - Xcode Command Line Tools with the macOS 15 SDK or later to build the Zoom audio helper. The packaged app includes this helper.
 - A searchable thesis PDF. Image-only PDFs require optical character recognition (OCR) before upload.
 
-The default answer connection uses your ChatGPT plan's Codex allowance through `omp`. If the subscription fails, Ghst reports the failure. It does not repeat a persistent agent action through another provider. OpenAI transcription and direct API answers incur API charges.
+The default answer connection uses your ChatGPT plan's Codex allowance through `omp`. If the subscription fails, Ghst reports the failure. It does not repeat a persistent agent action through another provider. A usage limit or a retry delay longer than 15 seconds stops the answer and shows the reason, because the runtime would otherwise wait hours. Select another answer connection in Settings. OpenAI transcription and direct API answers incur API charges.
 
 ## Start the application
 
@@ -71,7 +73,7 @@ On an Intel host, the output directory ends with `darwin-x64`. The build uses th
 2. Open Settings with the gear button beside the answer model menu.
 3. Select `ChatGPT — OpenAI subscription through omp` and select `Check connection`.
 4. Select `OpenAI API` as the transcription provider and enter your API key.
-5. Select a transcription model. If necessary, enter a language code such as `en` or `pt`.
+5. Select the `gpt-live-transcribe` model. This model writes words while you speak. If necessary, enter a language code such as `en` or `pt`.
 6. Save the settings.
 7. Select `+` below the question field and attach your PDF.
 8. Attach your Markdown skill files.
@@ -101,7 +103,9 @@ Run `omp login openai-codex` in your terminal to connect your account. Ghst does
 
 The settings panel separates answers from transcription. Local Whisper transcription does not require an API key.
 
-Ghst runs one persistent omp agent for the saved conversation. The agent receives the selected PDF passages, Markdown skill files, and current instructions. Its native conversation persists across questions and application restarts. The workspace holds `references/`, `skills/`, and `files/`. The application does not open a second interactive omp window.
+Ghst runs one persistent omp agent for the saved conversation. The agent reads the complete extracted PDF text from `references/` and the Markdown skill text from `skills/`, together with the current instructions. Its native conversation persists across questions and application restarts. The workspace also holds `files/` for working files. The application does not open a second interactive omp window.
+
+PDF references require an omp answer connection. The OpenAI API, Ollama, and custom connections have no file tools, so Ghst rejects an answer that would need a PDF rather than sending a partial PDF excerpt.
 
 Ghst disables ambient context files, LSP, prewalk, memory, and automatic model fallback inside the runtime.
 
@@ -183,19 +187,21 @@ Open `http://127.0.0.1:3210`. A browser can capture only the audio sources that 
 - Select `Answer this` below a transcript entry to answer that entry.
 - Select `Use latest` to edit the latest transcript before you send it.
 - Enable `Auto-answer` to answer each complete speech segment from the selected source.
-- Select a numbered citation button, such as `[1]`, inside an answer to inspect its passage and PDF page.
+- Read the citation in an answer, such as `(Thesis.pdf, p. 5)`, to check the source page in your PDF.
 - Select an answer model beside the Answer assistant title. API choices use API credits.
 - Continue the saved conversation to ask follow-up questions after the defense.
 
 Auto-answer is off by default. It processes speech segments, not speaker identities or confirmed jury questions. Pauses can divide a question into multiple segments. All speech from the selected source counts. For more control, keep auto-answer off and edit the question before you send it.
 
-The audio processor detects speech energy and waits approximately 1.15 seconds after a pause. It also divides continuous speech at approximately 22 seconds. It sends each segment as a complete mono WAV file. These are successive transcription requests, not token-by-token realtime transcription. The application stops capture if the transcription queue cannot keep up and reports the problem.
+The audio processor detects speech energy and waits approximately 1.15 seconds after a pause. It also divides continuous speech at approximately 22 seconds. For OpenAI transcription, the processor resamples each packet to 24 kHz mono PCM16 and streams it over a local WebSocket while you speak. The `gpt-live-transcribe` model writes partial words into the transcript area before the segment ends. A commit closes the segment, and the completed text enters Live transcript. Local Whisper keeps the complete WAV path. The application stops capture if the stream cannot keep up and reports the problem.
 
 The main window contains only the Answer assistant and Live transcript panels. Settings sits to the right of the answer model menu.
 
 Open Settings to use `Keep window on top` or `Compact view`. These controls apply immediately without `Save settings`. The pin button requires desktop mode.
 
-The compact view keeps the audio controls accessible. Reference files and the `+` upload button remain below the question field.
+The compact view keeps the audio controls accessible. The one-row question field has a control row below it. The `+` button and reference label share that row with the shortcut and send button. Attached files appear below the controls.
+
+The question field is 36 pixels high. The attachment and send buttons are each 32 pixels square, with the reference label vertically centered between them.
 
 The desktop window uses 92% opacity by default. Change the opacity in Settings from 50% to 100%. Reference file names retain their complete name in a hover label. Select an inline citation to read the source.
 
@@ -215,22 +221,18 @@ The app saves the name across restarts. Disable the eye button and save to resto
 | ----------------------- | --------------------------------------------------------------- |
 | PDF upload              | 100 MiB per file; eight files per request                       |
 | PDF extraction          | 10,000 pages and 50 million extracted characters per file       |
-| Initial PDF evidence    | Up to six passages, each up to 1,600 characters                 |
+| PDF evidence            | The agent reads relevant extracted pages directly                |
 | Markdown skill          | 32,000 characters per file; 64,000 characters across all skills |
-| Audio request           | Complete WAV file, at most 24 MiB and 120 seconds               |
+| Audio stream            | 24 kHz mono PCM16; three concurrent streams; local Whisper WAV at most 24 MiB and 120 seconds |
 | API and local answer history | Up to twelve previous messages within 24,000 characters for OpenAI API, Ollama, and custom requests |
 | Transcript context      | Most recent 12,000 characters                                   |
 | Conversation            | One active saved conversation; previous saved data remains on disk |
 
-PDF search uses local BM25 lexical search. It does not require a paid embedding service or an upstream file store. It indexes all extracted pages and adds abstract, conclusion, or limitation passages for broad questions. Short follow-up questions also use the preceding question for retrieval.
+Ghst extracts PDF text page by page and writes it to the agent workspace with `Page N` markers. The agent locates terms with `grep`, then reads the relevant pages with `read`. The original PDF stays on your device and Ghst sends no PDF file to a provider.
 
-Each answer initially receives selected passages. omp agents can also read all extracted PDF text from their session workspace.
+The application does not use lexical search, embeddings, or a vector database. Document access is a per-conversation map of extracted documents.
 
-OpenAI API, Ollama, and custom answers receive the selected passages rather than the complete PDF text. The original PDF stays on your device.
-
-omp retains native conversation history and applies automatic compaction. The application history limit applies only to the initial history supplied to a native session.
-
-Search can miss synonyms, image content, equations, or evidence spread across many pages. A source list identifies retrieved passages. It does not prove that each generated claim follows from them.
+Extraction can lose image-only content, equations rendered as images, and text in charts. Read the cited page before you repeat a claim.
 
 Check each answer against the thesis. Page numbers refer to the physical PDF page, which can differ from the printed page label.
 
@@ -250,13 +252,13 @@ The application sends data to the selected connections:
 
 | Connection | Data sent |
 | ---------- | --------- |
-| OpenAI transcription or the configured Whisper endpoint | Audio speech segments and transcription options |
-| Selected answer provider or endpoint | Your question, conversation context, selected PDF passages, and attached Markdown skills |
-| omp answer provider | Additional PDF text that the agent reads from the session workspace |
+| OpenAI transcription or the configured Whisper endpoint | Live PCM speech frames, segment commits, and transcription options |
+| Selected answer provider or endpoint | Your question, recent transcript context, conversation history, and attached Markdown skills |
+| omp answer provider | Extracted PDF pages that the agent reads from the session workspace |
 
 Ollama and Whisper process data locally only when you configure services on your device. A remote service receives the data sent to its URL.
 
-The application does not upload the original PDF to an OpenAI file store. It deletes temporary audio after each request. It saves transcripts and answers in the local data directory.
+The application does not upload the original PDF to an OpenAI file store. It deletes temporary WAV files after each local transcription request. It saves transcripts and answers in the local data directory.
 
 An empty API-key field preserves the saved key. To remove it, quit Ghst and clear the `apiKey` value in `state.json`. This does not remove `OPENAI_API_KEY` from your environment.
 
@@ -270,10 +272,10 @@ Run the regression suite:
 npm test
 ```
 
-The suite covers PDF passage boundaries, late-page retrieval, follow-up context, source coverage, per-session reference isolation, reference removal, and complete WAV validation. Subscription checks cover provider separation, incomplete streams, cancellation, timeouts, and process cleanup.
-The agent checks cover isolated tool ownership, redirected session directories, RPC frame limits, dialog responses, persistent history, and reference synchronization. They also cover automatic maintenance, consecutive transcript answers, and separate native sessions.
+The suite covers PDF upload, extraction limits, per-session reference isolation, reference removal, agent workspace synchronization, live speech stream setup and refusal, and complete WAV validation. It also checks that OpenAI API, Ollama, and custom connections reject PDF references before a provider request.
+The agent checks cover isolated tool ownership, redirected session directories, RPC frame limits, dialog responses, persistent history, and reference synchronization. They also cover automatic maintenance, consecutive transcript answers, and separate native sessions. Subscription checks cover provider separation, incomplete streams, cancellation, timeouts, and process cleanup.
 
-Local integration checks exercised a generated 180-page PDF, retrieval from page 141, reference persistence after restart, Markdown export, protected key storage, and cross-origin rejection. Browser checks exercised streamed answers, source display, automatic answers, a synthetic audio input through the AudioWorklet/WAV path, and the pending-transcript session guard. These checks used a local OpenAI protocol fixture, not real model inference.
+Local integration checks exercised a generated 180-page PDF, reference persistence after restart, Markdown export, protected key storage, and cross-origin rejection. Browser checks exercised streamed answers, automatic answers, a synthetic audio input through the AudioWorklet/WAV path, and the pending-transcript session guard. These checks used a local OpenAI protocol fixture, not real model inference.
 
 The standalone macOS app also launched successfully. Its compact resize and always-on-top controls worked. A live Zoom call still requires an API key for transcription and operating-system capture permission.
 
@@ -281,9 +283,9 @@ A live omp check answered from an attached test PDF through `openai-codex/gpt-6-
 
 Browser checks verified the selected-model check and saved settings for each provider. The rebuilt macOS app opened with ChatGPT through omp as its default answer connection and detected the configured sign-in.
 
-Persistent-agent failure checks cover quota errors, cancellation, client disconnects, and saved answer history without automatic provider replay.
+Persistent-agent failure checks cover quota errors, cancellation, client disconnects, and saved answer history without automatic provider replay. A quota retry now stops the answer within seconds and reports the limit.
 
-A real API request with reference evidence and a revised answer skill produced an answer without an irrelevant evidence-gap sentence. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified.
+A real API request with attached Markdown instructions produced an answer without an irrelevant evidence-gap sentence. That request used the earlier passage-retrieval path and predates the agent-only reference change. The native Zoom helper compiled and its missing-Zoom error path stopped without microphone capture. A live Zoom capture remains unverified.
 
 The 31/10 browser check verified the tab-free interface, equal-size audio controls, centered upload symbol, reference upload, and consecutive transcript answers. It used a local answer fixture, not real model inference. Session creation, rename, deletion, and archived-conversation requests returned 404.
 
@@ -291,11 +293,11 @@ An installed-runtime check confirmed automatic compaction and separate native se
 
 Native Electron checks verified compact audio controls at 520 pixels without horizontal overflow. The Settings form changed the main process label, app name, and window title. The custom name survived a restart. Disabling disguise restored `Ghst`. A control-character name failed without a change to the saved name.
 
-The rebuilt macOS app launched with one conversation, no tabs, and the `Listen` control below `Live transcript`. Compact mode kept the microphone-device selector accessible. The regression suite passed all 86 tests.
+A browser check streamed microphone audio to the local stream endpoint and stored the completed transcript. The partial text appeared before the segment ended. Start and stop left no console errors. That check used a local realtime fixture, not real model inference. The regression suite passed all 97 tests.
 
 ## Landing page
 
-The static landing page resides in `site/`. It includes an app screenshot and links to the GitHub repository. It requires no build step.
+The static landing page resides in `site/`. It includes an app screenshot, links to the GitHub repository, and the application’s dark, purple, and green palette. It requires no build step.
 
 ### Local preview
 
