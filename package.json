@@ -19,10 +19,11 @@
     "express": "^5.1.0",
     "multer": "^2.0.2",
     "openai": "^6.0.0",
-    "pdfjs-dist": "^5.4.296"
+    "pdfjs-dist": "^5.4.296",
+    "ws": "^8.22.2"
   },
   "devDependencies": {
-    "electron": "45.0.0",
-    "@electron/packager": "20.3.0"
+    "@electron/packager": "20.3.0",
+    "electron": "45.0.0"
   }
 }

@@ -16,8 +16,13 @@ import {
   answerMessages,
   clientFor,
   modelError,
-  transcribe,
 } from "./lib/openai.js";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL,
+  REALTIME_MODELS,
+  RealtimeTranscription,
+} from "./lib/realtime.js";
+import { WebSocketServer } from "ws";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const asyncRoute = (handler) => (req, res, next) =>
@@ -156,12 +161,20 @@ export async function startServer({
   store = new Store(),
   subscription = new Subscription(),
   createClient = clientFor,
+  createRealtime = (options) => new RealtimeTranscription(options),
   agentRuntime,
 } = {}) {
   port = Number(port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error("PORT must be an integer from 0 to 65535.");
   await store.init();
+  if (
+    store.state.settings.transcribeProvider === "openai" &&
+    !REALTIME_MODELS.has(store.state.settings.transcribeModel)
+  )
+    await store.update((state) => {
+      state.settings.transcribeModel = DEFAULT_TRANSCRIPTION_MODEL;
+    });
   const documents = await new Documents(store).init();
   agentRuntime ||= new PersistentOmp({ store, documents });
   const answering = new Map();
@@ -391,7 +404,11 @@ export async function startServer({
     (req, _res, next) => {
       try {
         req.transcriptionSettings = { ...store.state.settings };
-        if (req.transcriptionSettings.transcribeProvider !== "local") req.openai = clientFor(store);
+        if (req.transcriptionSettings.transcribeProvider !== "local")
+          throw new HttpError(
+            409,
+            "OpenAI transcription uses a live speech stream. Select Local Whisper to send complete WAV files.",
+          );
         if (transcriptions.size >= 3)
           throw new HttpError(
             429,
@@ -418,10 +435,11 @@ export async function startServer({
       });
       try {
         await chmod(req.file.path, 0o600);
-        const text = req.transcriptionSettings.transcribeProvider === "local"
-          ? await localTranscribe({ settings: req.transcriptionSettings, path: req.file.path, signal: controller.signal })
-          : await transcribe(req.openai, req.file.path, req.transcriptionSettings.language,
-              controller.signal, req.transcriptionSettings.transcribeModel);
+        const text = await localTranscribe({
+          settings: req.transcriptionSettings,
+          path: req.file.path,
+          signal: controller.signal,
+        });
         if (!res.destroyed) res.json({ text });
       } finally {
         transcriptions.delete(controller);
@@ -679,11 +697,106 @@ export async function startServer({
     res.status(safe.status).json({ error: safe.message });
   });
   const server = createServer(app);
+  const streams = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+  const refuse = (socket, message) => {
+    const body = JSON.stringify({ error: message });
+    socket.end(
+      `HTTP/1.1 403 Forbidden\r\nConnection: close\r\n` +
+        `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+  };
+  server.on("upgrade", (req, socket, head) => {
+    let pathname = "";
+    try {
+      pathname = new URL(req.url, "http://localhost").pathname;
+    } catch {
+      return socket.destroy();
+    }
+    if (pathname !== "/api/transcribe/stream") return socket.destroy();
+    const local = new Set([
+      `127.0.0.1:${req.socket.localPort}`,
+      `localhost:${req.socket.localPort}`,
+    ]);
+    const origin = req.headers.origin;
+    if (!local.has(req.headers.host) || (origin && origin !== `http://${req.headers.host}`))
+      return refuse(socket, "This service accepts local requests only.");
+    const rejected =
+      store.state.settings.transcribeProvider !== "openai"
+        ? "Select OpenAI transcription to use a live speech stream."
+        : !store.key()
+          ? "Add an OpenAI API key before you start transcription."
+          : streams.clients.size >= 3
+            ? "Three speech streams are already open. Wait before starting another."
+            : "";
+    req.transcriptionError = rejected;
+    streams.handleUpgrade(req, socket, head, (client) =>
+      streams.emit("connection", client, req),
+    );
+  });
+  streams.on("connection", (client, req) => {
+    const send = (message) => {
+      if (client.readyState === 1) client.send(JSON.stringify(message));
+    };
+    if (req.transcriptionError) {
+      send({ type: "error", message: req.transcriptionError });
+      client.close(1008, "Transcription rejected.");
+      return;
+    }
+    const settings = { ...store.state.settings };
+    let session;
+    try {
+      session = createRealtime({
+        apiKey: store.key(),
+        model: REALTIME_MODELS.has(settings.transcribeModel)
+          ? settings.transcribeModel
+          : DEFAULT_TRANSCRIPTION_MODEL,
+        language: settings.language,
+        onDelta: ({ seq, delta }) => send({ type: "delta", seq, delta }),
+        onCompleted: ({ seq, transcript }) => send({ type: "completed", seq, transcript }),
+        onFailure: (message) => {
+          send({ type: "error", message });
+          client.close(1011, "Transcription failed.");
+        },
+      });
+    } catch (error) {
+      send({ type: "error", message: error.message });
+      client.close(1008, "Transcription session rejected.");
+      return;
+    }
+    session.ready
+      .then(() => send({ type: "ready" }))
+      .catch((error) => {
+        send({ type: "error", message: error.message });
+        client.close(1011, "Transcription unavailable.");
+      });
+    let finished = false;
+    const end = () => {
+      if (finished) return;
+      finished = true;
+      session.close();
+    };
+    client.on("message", (data, isBinary) => {
+      if (isBinary) return session.append(data);
+      let message;
+      try {
+        message = JSON.parse(data.toString());
+      } catch {
+        return client.close(1008, "Send JSON control messages.");
+      }
+      if (message?.type === "commit")
+        session.commit(Number.isInteger(message.seq) ? message.seq : null);
+      else if (message?.type === "stop") client.close(1000, "Client stopped.");
+    });
+    client.on("close", end);
+    client.on("error", end);
+  });
   server.requestTimeout = 10 * 60 * 1000;
   server.headersTimeout = 30000;
   let shutdownPromise;
   const shutdown = () => shutdownPromise ||= (async () => {
     for (const controller of [...answering.values(), ...transcriptions]) controller.abort();
+    for (const client of streams.clients) client.close(1001, "The server is closing.");
+    streams.close();
     subscription.close();
     await agentRuntime.close();
   })();

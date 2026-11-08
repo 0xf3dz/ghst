@@ -587,6 +587,13 @@ main {
   color: #777082;
   line-height: 1.8;
 }
+.partial-transcript {
+  margin: 0 17px 8px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #8f88a3;
+  font-style: italic;
+}
 .audio-meter {
   height: 2px;
   background: #23242b;

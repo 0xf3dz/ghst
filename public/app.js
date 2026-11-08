@@ -710,7 +710,7 @@ async function answer(question, id, answerProvider) {
 $("#question-form").onsubmit = (event) => {
   event.preventDefault();
   const text = $("#question").value.trim();
-  if (!text || answering) return;
+  if (!text || answering || !state) return;
   $("#question").value = "";
   enqueueAnswer(text);
 };
@@ -836,7 +836,7 @@ function wavBlob(chunks, sampleRate) {
     }
   return new Blob([data], { type: "audio/wav" });
 }
-function submitAudio(chunks, rate, id) {
+function submitWav(chunks, rate, id) {
   if (!chunks.length) return;
   if (queuedAudio >= 8) {
     notify(
@@ -872,6 +872,141 @@ function submitAudio(chunks, rate, id) {
           : "Ready when you are";
     });
 }
+function pcm16(input) {
+  const output = new Int16Array(input.length);
+  for (let index = 0; index < input.length; index++) {
+    const value = Math.max(-1, Math.min(1, input[index]));
+    output[index] = value < 0 ? value * 32768 : value * 32767;
+  }
+  return output;
+}
+function resample16(input, rate) {
+  if (rate === 24000) return pcm16(input);
+  const ratio = rate / 24000,
+    length = Math.floor(input.length / ratio),
+    output = new Int16Array(length);
+  for (let index = 0; index < length; index++) {
+    const start = Math.floor(index * ratio),
+      end = Math.min(input.length, Math.floor((index + 1) * ratio));
+    let sum = 0;
+    for (let sample = start; sample < end; sample++) sum += input[sample];
+    const value = Math.max(
+      -1,
+      Math.min(1, end > start ? sum / (end - start) : input[start] || 0),
+    );
+    output[index] = value < 0 ? value * 32768 : value * 32767;
+  }
+  return output;
+}
+function sendAudio(target, chunk) {
+  const stream = target.speech;
+  if (!stream || stream.socket.readyState !== WebSocket.OPEN) return;
+  if (stream.socket.bufferedAmount > 4 * 1024 * 1024) {
+    notify("The speech stream cannot keep up. Audio capture stopped.");
+    stopCapture();
+    return;
+  }
+  stream.socket.send(resample16(chunk, target.context.sampleRate));
+}
+function renderPartial(stream) {
+  const node = $("#partial-transcript");
+  const entries = [...stream.partials.entries()].sort(
+    (left, right) => left[0] - right[0],
+  );
+  const latest = entries.at(-1);
+  node.textContent = latest ? latest[1] : "";
+  node.hidden = !latest;
+}
+function showPartial(target, seq, delta) {
+  const stream = target.speech;
+  if (!stream || !Number.isInteger(seq) || !delta) return;
+  stream.partials.set(seq, (stream.partials.get(seq) || "") + delta);
+  renderPartial(stream);
+  $("#partial-transcript").scrollIntoView({ block: "nearest" });
+}
+function completeSegment(target, message) {
+  const stream = target.speech;
+  if (stream) {
+    if (Number.isInteger(message.seq)) {
+      stream.partials.delete(message.seq);
+      renderPartial(stream);
+    }
+    stream.outstanding = Math.max(0, stream.outstanding - 1);
+  }
+  queuedAudio = Math.max(0, queuedAudio - 1);
+  $("#audio-status").textContent = queuedAudio
+    ? `${queuedAudio} audio segments to transcribe`
+    : capture
+      ? "Live transcription active"
+      : "Ready when you are";
+  if (message.transcript?.trim())
+    transcriptionQueue = transcriptionQueue
+      .then(() => storeTranscript(message.transcript.trim(), target.id))
+      .catch((error) => notify(`Transcript save failed: ${error.message}`));
+  if (target.stopRequested && !queuedAudio) closeStream(target);
+}
+function closeStream(target) {
+  const stream = target.speech;
+  if (!stream) return;
+  target.speech = null;
+  clearTimeout(target.drainTimer);
+  if (stream.outstanding) {
+    queuedAudio = Math.max(0, queuedAudio - stream.outstanding);
+    stream.outstanding = 0;
+    $("#audio-status").textContent = queuedAudio
+      ? `${queuedAudio} audio segments to transcribe`
+      : "Ready when you are";
+  }
+  const node = $("#partial-transcript");
+  if (node) {
+    node.textContent = "";
+    node.hidden = true;
+  }
+  try {
+    stream.socket.close();
+  } catch {
+    // The stream already closed.
+  }
+}
+function openSpeechStream(target) {
+  return new Promise((resolve, reject) => {
+    const url = new URL("/api/transcribe/stream", location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(url.href);
+    socket.binaryType = "arraybuffer";
+    const stream = { socket, ready: false, seq: 0, outstanding: 0, partials: new Map() };
+    target.speech = stream;
+    let reported = false;
+    socket.onmessage = (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === "ready") {
+        stream.ready = true;
+        resolve(socket);
+      } else if (message.type === "delta") showPartial(target, message.seq, message.delta);
+      else if (message.type === "completed") completeSegment(target, message);
+      else if (message.type === "error") {
+        reported = true;
+        notify(message.message);
+        reject(new Error(message.message));
+        if (capture === target) stopCapture();
+      }
+    };
+    socket.onerror = () =>
+      reject(new Error("The local speech stream failed to open."));
+    socket.onclose = () => {
+      if (stream.ready && !reported && capture === target) {
+        reported = true;
+        notify("The speech stream closed. Start listening to reconnect.");
+        stopCapture();
+      }
+    };
+  });
+}
 function processAudio(data, target) {
   if (capture !== target) return;
   let energy = 0;
@@ -890,8 +1025,19 @@ function processAudio(data, target) {
     target.voiced += seconds;
   } else target.silence += seconds;
   if (target.speaking) {
-    target.chunks.push(data);
     target.duration += seconds;
+    if (target.speech) {
+      if (target.streaming) sendAudio(target, data);
+      else {
+        target.chunks.push(data);
+        if (target.voiced >= 0.3) {
+          target.streaming = true;
+          const buffered = target.chunks;
+          target.chunks = [];
+          for (const chunk of buffered) sendAudio(target, chunk);
+        }
+      }
+    } else target.chunks.push(data);
     if (target.silence > 1.15 || target.duration > 22) flushAudio(target);
   }
   target.preroll.push(data);
@@ -903,14 +1049,29 @@ function processAudio(data, target) {
 }
 function flushAudio(target) {
   const chunks = target.chunks,
-    voiced = target.voiced;
+    voiced = target.voiced,
+    streaming = target.streaming;
   target.chunks = [];
   target.duration = 0;
   target.voiced = 0;
   target.speaking = false;
   target.silence = 0;
   target.preroll = [];
-  if (voiced >= 0.3) submitAudio(chunks, target.context.sampleRate, target.id);
+  target.streaming = false;
+  if (voiced < 0.3) return;
+  if (target.speech) {
+    if (!streaming) for (const chunk of chunks) sendAudio(target, chunk);
+    const stream = target.speech;
+    if (!stream?.ready || stream.socket.readyState !== WebSocket.OPEN) return;
+    const seq = ++stream.seq;
+    stream.outstanding++;
+    queuedAudio++;
+    $("#audio-status").textContent =
+      `${queuedAudio} audio segment${queuedAudio === 1 ? "" : "s"} to transcribe`;
+    stream.socket.send(JSON.stringify({ type: "commit", seq }));
+    return;
+  }
+  submitWav(chunks, target.context.sampleRate, target.id);
 }
 function activateCapture(target) {
   $("#listen").textContent = "Stop";
@@ -919,7 +1080,13 @@ function activateCapture(target) {
   $("#live-label").classList.add("active");
   $("#audio-source").disabled = true;
   $("#audio-device").disabled = true;
-  $("#audio-status").textContent = target.nativeZoom ? "Zoom output capture active" : "Audio capture active";
+  $("#audio-status").textContent = target.speech
+    ? target.nativeZoom
+      ? "Zoom output streaming"
+      : "Microphone streaming"
+    : target.nativeZoom
+      ? "Zoom output capture active"
+      : "Audio capture active";
   target.timer = setInterval(() => {
     const seconds = Math.floor((Date.now() - target.start) / 1000);
     $("#timer").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -947,6 +1114,8 @@ async function startZoomCapture() {
       throw new Error("Zoom capture returned an invalid audio rate.");
     target.context.sampleRate = result.sampleRate;
     capture = target;
+    if (state.settings.transcribeProvider !== "local")
+      await openSpeechStream(target);
     ready = true;
     activateCapture(target);
     for (const data of pending) processAudio(data, target);
@@ -1035,6 +1204,8 @@ async function startCapture() {
       throw new Error(
         "Audio permission failed. Check macOS System Settings and restart the app.",
       );
+    if (state.settings.transcribeProvider !== "local")
+      await openSpeechStream(target);
     activateCapture(target);
   } catch (error) {
     if (capture) stopCapture();
@@ -1052,8 +1223,13 @@ function stopCapture() {
   const target = capture;
   if (!target) return;
   capture = null;
+  target.stopRequested = true;
   clearInterval(target.timer);
   flushAudio(target);
+  if (target.speech) {
+    if (queuedAudio) target.drainTimer = setTimeout(() => closeStream(target), 20000);
+    else closeStream(target);
+  }
   if (target.nativeZoom) {
     target.unsubscribe();
     target.unsubscribeError();
