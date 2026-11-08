@@ -49,28 +49,28 @@
                 rows="1"
                 placeholder="Ask a question, or use the live transcript…"
               ></textarea>
-              <div id="upload-zone" class="composer-library" role="group" aria-label="References">
-                <button id="upload-files" class="icon-button" type="button" aria-label="Upload PDF or Markdown references" aria-describedby="upload-help" title="Upload PDF or Markdown · up to 100 MB per file">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-                </button>
+              <div id="upload-zone" class="composer-library" role="group" aria-label="Question controls and references">
+                <div class="composer-bottom">
+                  <button id="upload-files" class="icon-button" type="button" aria-label="Upload PDF or Markdown references" aria-describedby="upload-help" title="Upload PDF or Markdown · up to 100 MB per file">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                  </button>
+                  <span id="context-label">No references attached</span>
+                  <div class="composer-actions">
+                    <kbd>⌘ ↵</kbd>
+                    <button
+                      type="submit"
+                      id="ask"
+                      class="send-button"
+                      aria-label="Send question"
+                    >
+                      ↑
+                    </button>
+                  </div>
+                </div>
                 <input id="files" type="file" accept=".pdf,.md" multiple hidden />
-                <span id="context-label">No references attached</span>
                 <div id="documents" class="documents" role="list" aria-label="Attached references"></div>
                 <span id="upload-help" class="sr-only">Upload PDF or Markdown files, up to 100 MB each, or drop them here. References stay with this conversation.</span>
                 <span id="upload-label" class="sr-only" role="status"></span>
-              </div>
-              <div class="composer-bottom">
-                <div>
-                  <kbd>⌘ ↵</kbd>
-                  <button
-                    type="submit"
-                    id="ask"
-                    class="send-button"
-                    aria-label="Send question"
-                  >
-                    ↑
-                  </button>
-                </div>
               </div>
             </form>
           </section>
