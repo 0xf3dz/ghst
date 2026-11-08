@@ -480,14 +480,10 @@ export async function startServer({
               "This request ID was already used with another question.",
             );
           res.type("application/x-ndjson");
-          await sendEvent(res, {
-            type: "sources",
-            sources: previous.sources || [],
-          });
           const { id, role, text, sources } = previous;
           await sendEvent(res, {
             type: "done",
-            message: { id, role, text, sources },
+            message: { id, role, text, ...(sources ? { sources } : {}) },
           });
           return res.end();
         }
@@ -498,13 +494,6 @@ export async function startServer({
         if (!res.writableEnded) controller.abort();
       });
       try {
-        const previousQuestion =
-          snapshot.messages.slice(snapshot.contextMessageStart || 0)
-            .reverse()
-            .find((message) => message.role === "user" && !message.pending)
-            ?.text || "";
-        const index = documents.indexFor(sessionId);
-        const sources = index.search(question, 6, previousQuestion);
         const settings = { ...store.state.settings };
         if (
           requestedProvider !== undefined &&
@@ -514,6 +503,10 @@ export async function startServer({
             409,
             "The answer connection changed. Send this question again with the selected connection.",
           );
+        if (!["chatgpt", "claude", "gemini", "groq"].includes(settings.answerProvider))
+          for (const document of documents.forSession(sessionId).values())
+            if (document.type === "pdf")
+              throw new HttpError(409, "PDF references require an omp answer connection. Select ChatGPT, Claude, Gemini, or Groq in Settings.");
         let client;
         if (settings.answerProvider === "openai") {
           client = answerClient(settings, () => createClient(store));
@@ -529,8 +522,7 @@ export async function startServer({
           settings,
           session: snapshot,
           question,
-          sources,
-          skills: index.skills(),
+          skills: documents.skills(sessionId),
         });
         const userMessageId = await store.update((state) => {
           const session = store.session(sessionId, state);
@@ -577,7 +569,6 @@ export async function startServer({
           "X-Accel-Buffering": "no",
         });
         res.flushHeaders();
-        await sendEvent(res, { type: "sources", sources });
         let text = "";
         const agentEvents = [];
         let activityCharacters = 0;
@@ -619,7 +610,6 @@ export async function startServer({
             id: randomUUID(),
             role: "assistant",
             text,
-            sources,
             ...(agentEvents.length ? { agentEvents } : {}),
           };
           await store.update((state) => {
