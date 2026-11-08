@@ -297,7 +297,7 @@ A browser check streamed microphone audio to the local stream endpoint and store
 
 ## Landing page
 
-The static landing page resides in `site/`. It includes an app screenshot, links to the GitHub repository, and the application’s dark, purple, and green palette. It requires no build step.
+The static landing page resides in `site/`. It includes an app screenshot, links to the GitHub repository, and the application’s dark, purple, and green palette. It requires no build step. The header and the favicon use `site/assets/ghst-logo.png`, a white transparent copy of the app icon.
 
 ### Local preview
 
